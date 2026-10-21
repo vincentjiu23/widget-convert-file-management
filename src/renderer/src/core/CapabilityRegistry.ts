@@ -79,56 +79,8 @@ export const CAPABILITY_SECTORS: Record<FileCategory, RadialSector[]> = {
       accentColor: '#10b981'
     }
   ],
-  generic_file: [
-    {
-      id: 'gen-png',
-      label: 'PNG',
-      format: 'png',
-      description: 'To Image (Lossless)',
-      category: 'image',
-      accentColor: '#38bdf8'
-    },
-    {
-      id: 'gen-jpg',
-      label: 'JPEG',
-      format: 'jpg',
-      description: 'To Image (Photo)',
-      category: 'image',
-      accentColor: '#fb923c'
-    },
-    {
-      id: 'gen-mp4',
-      label: 'MP4',
-      format: 'mp4',
-      description: 'To Video (H.264)',
-      category: 'video',
-      accentColor: '#f97316'
-    },
-    {
-      id: 'gen-pdf',
-      label: 'PDF',
-      format: 'pdf',
-      description: 'To Document (PDF)',
-      category: 'document',
-      accentColor: '#ef4444'
-    },
-    {
-      id: 'gen-docx',
-      label: 'DOCX',
-      format: 'docx',
-      description: 'To Document (Word)',
-      category: 'document',
-      accentColor: '#2563eb'
-    },
-    {
-      id: 'gen-txt',
-      label: 'TXT',
-      format: 'txt',
-      description: 'To Plain Text',
-      category: 'document',
-      accentColor: '#10b981'
-    }
-  ],
+  // When file identity is pending/unknown, do NOT fake a format list. Show empty sectors.
+  generic_file: [],
   unknown: []
 };
 
@@ -151,38 +103,22 @@ export function validateConversionCompatibility(
   const normSource = sourceExtension.toLowerCase().replace(/^\./, '').replace('jpeg', 'jpg');
   const normTarget = targetFormat.toLowerCase().replace(/^\./, '').replace('jpeg', 'jpg');
 
-  if (category === 'unknown') {
+  if (category === 'unknown' || category === 'generic_file') {
     return {
       isSupported: false,
       isSameFormat: false,
-      reason: 'This file format is not currently supported. Radial File Studio converts Images, Videos, and Documents.'
+      reason: 'Please drop the file onto the primary circle first to identify category and reveal compatible formats.'
     };
   }
 
-  // Cross-category validation: target format category must match source category
-  let actualCategory = category;
-  if (category === 'generic_file') {
-    // Determine category from the true extension
-    if (['png', 'jpg', 'jpeg', 'webp', 'bmp', 'gif', 'svg'].includes(normSource)) actualCategory = 'image';
-    else if (['mp4', 'webm', 'mov', 'mkv', 'avi'].includes(normSource)) actualCategory = 'video';
-    else if (['pdf', 'docx', 'doc', 'txt', 'xlsx', 'pptx'].includes(normSource)) actualCategory = 'document';
-    else {
-      return {
-        isSupported: false,
-        isSameFormat: false,
-        reason: `Unsupported source file (.${normSource.toUpperCase()}). Radial converts Images, Videos, and Documents.`
-      };
-    }
-  }
-
-  const validSectors = getCompatibleSectors(actualCategory);
+  const validSectors = getCompatibleSectors(category);
   const isValidTarget = validSectors.some((s) => s.format.toLowerCase() === normTarget);
 
   if (!isValidTarget) {
     return {
       isSupported: false,
       isSameFormat: false,
-      reason: `Target format .${targetFormat.toUpperCase()} is not compatible with ${actualCategory} files (.${normSource.toUpperCase()}).`
+      reason: `Target format .${targetFormat.toUpperCase()} is not available for ${category} files.`
     };
   }
 
@@ -190,7 +126,7 @@ export function validateConversionCompatibility(
     return {
       isSupported: true,
       isSameFormat: true,
-      reason: `Source file is already .${targetFormat.toUpperCase()}. Conversion will create an optimized copy without overwriting.`,
+      reason: `Source file is already .${targetFormat.toUpperCase()}. Conversion intent recorded without overwrite.`,
       targetFormat: normTarget
     };
   }

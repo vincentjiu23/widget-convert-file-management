@@ -13,7 +13,7 @@ export class FolderPermissionRegistry {
   private databaseService: DatabaseService;
   private cachedApprovedFolders: Map<string, ApprovedFolderRecord> = new Map();
 
-  // Protected Windows system directories that must never be blindly indexed
+  // Protected Windows system directories that must never be indexed or accessed
   private blockedSystemPrefixes: string[] = [
     'C:\\Windows',
     'C:\\Program Files',
@@ -32,7 +32,7 @@ export class FolderPermissionRegistry {
     const folders = this.databaseService.getApprovedFolders();
     this.cachedApprovedFolders.clear();
     for (const f of folders) {
-      this.cachedApprovedFolders.set(this.canonicalize(f.path), f);
+      this.cachedApprovedFolders.set(this.canonicalize(f.path).toLowerCase(), f);
     }
   }
 
@@ -129,23 +129,29 @@ export class FolderPermissionRegistry {
     });
 
     this.refreshCache();
-    const created = this.cachedApprovedFolders.get(canonical);
+    const created = this.cachedApprovedFolders.get(canonical.toLowerCase());
     return { success: true, folder: created };
   }
 
   public removeFolder(folderId: string): boolean {
+    const folder = this.databaseService.getApprovedFolderById(folderId);
+    if (!folder) return false;
+
     this.databaseService.removeApprovedFolder(folderId);
     this.databaseService.logActivity({
       event_type: 'FOLDER_REMOVED',
       resource_type: 'FOLDER',
       resource_id: folderId,
-      summary: `Folder removed from approved scope: ${folderId}`
+      summary: `Folder removed from approved scope: ${folder.name} (${folder.path})`
     });
     this.refreshCache();
     return true;
   }
 
   public toggleFolder(folderId: string, enabled: boolean): boolean {
+    const folder = this.databaseService.getApprovedFolderById(folderId);
+    if (!folder) return false;
+
     this.databaseService.toggleFolder(folderId, enabled);
     this.refreshCache();
     return true;
@@ -155,9 +161,13 @@ export class FolderPermissionRegistry {
     return this.databaseService.getApprovedFolders();
   }
 
+  public getApprovedFolderById(folderId: string): ApprovedFolderRecord | null {
+    return this.databaseService.getApprovedFolderById(folderId);
+  }
+
   /**
    * Validates whether a file or subdirectory path falls strictly within user-approved folders.
-   * Protects against traversal ('..'), symlink escape, and unauthorized path access.
+   * Handles Windows case-insensitivity, path traversal ('..'), and junction/symlink escapes.
    */
   public isPathWithinApprovedFolder(targetRawPath: string): PathValidationResult {
     const canonicalTarget = this.canonicalize(targetRawPath);
@@ -166,15 +176,40 @@ export class FolderPermissionRegistry {
       return { isValid: false, canonicalPath: '', error: 'INVALID_PATH' };
     }
 
+    const lowerTarget = canonicalTarget.toLowerCase();
+
     for (const approved of this.cachedApprovedFolders.values()) {
       if (!approved.enabled) continue;
 
-      const canonicalApproved = approved.path;
-      // Exact match or sub-path boundary check
+      const canonicalApproved = this.canonicalize(approved.path);
+      const lowerApproved = canonicalApproved.toLowerCase();
+
+      // Case-insensitive exact match or subpath prefix check
       if (
-        canonicalTarget === canonicalApproved ||
-        canonicalTarget.startsWith(canonicalApproved + path.sep)
+        lowerTarget === lowerApproved ||
+        lowerTarget.startsWith(lowerApproved + path.sep)
       ) {
+        // Reparse Point / Junction / Symlink safety check:
+        // Ensure resolved realpath does not point outside the approved root!
+        if (fs.existsSync(canonicalTarget)) {
+          try {
+            const realTarget = fs.realpathSync(canonicalTarget);
+            const lowerReal = this.canonicalize(realTarget).toLowerCase();
+            if (
+              lowerReal !== lowerApproved &&
+              !lowerReal.startsWith(lowerApproved + path.sep)
+            ) {
+              return {
+                isValid: false,
+                canonicalPath: canonicalTarget,
+                error: 'SECURITY_VIOLATION: Symlink or junction points outside approved folder scope.'
+              };
+            }
+          } catch {
+            // File might be transient or unreadable
+          }
+        }
+
         return {
           isValid: true,
           canonicalPath: canonicalTarget,

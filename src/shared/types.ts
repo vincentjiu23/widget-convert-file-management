@@ -9,6 +9,7 @@ export type RadialInteractionState =
   | 'DROP_VALIDATION'
   | 'JOB_QUEUED'
   | 'PROCESSING'
+  | 'PREVIEW_RECORDED'
   | 'SUCCESS'
   | 'ERROR';
 
@@ -37,7 +38,7 @@ export interface ConversionJob {
   sourceFileName: string;
   inputFormat: string;
   outputFormat: string;
-  status: 'QUEUED' | 'RUNNING' | 'SUCCEEDED' | 'FAILED' | 'CANCELLED';
+  status: 'QUEUED' | 'RUNNING' | 'PREVIEW_RECORDED' | 'FAILED' | 'CANCELLED' | 'SUCCEEDED';
   progress: number;
   createdAt: number;
   startedAt?: number;
@@ -45,6 +46,7 @@ export interface ConversionJob {
   outputPath?: string;
   errorCode?: string;
   errorMessage?: string;
+  engineMessage?: string;
 }
 
 export interface ApprovedFolder {

@@ -120,7 +120,7 @@ describe('RadialStateMachine Transition Suite', () => {
     expect(sEscaped.state).toBe('IDLE');
   });
 
-  it('handles job lifecycle: QUEUED -> PROCESSING -> SUCCESS', () => {
+  it('handles job lifecycle: QUEUED -> PROCESSING -> PREVIEW_RECORDED (no false SUCCESS)', () => {
     let s = radialStateReducer(INITIAL_STATE_CONTEXT, {
       type: 'DRAG_ENTER',
       file: dummyImageFile
@@ -132,11 +132,16 @@ describe('RadialStateMachine Transition Suite', () => {
     expect(s.state).toBe('PROCESSING');
     expect(s.activeJobId).toBe('job-123');
 
+    // Gate requirement: use RECORD_CONVERSION_PREVIEW, NOT a fake JOB_COMPLETED
     s = radialStateReducer(s, {
-      type: 'JOB_COMPLETED',
-      outputPath: 'C:\\Users\\User\\Pictures\\photo.png'
+      type: 'RECORD_CONVERSION_PREVIEW',
+      targetFormat: 'png',
+      note: 'Preview registered (.PNG target). Engine inactive in Phase 0/1 gate.'
     });
-    expect(s.state).toBe('SUCCESS');
-    expect(s.successMessage).toContain('photo.png');
+    expect(s.state).toBe('PREVIEW_RECORDED');
+    expect(s.successMessage).toContain('Engine inactive');
+    // Must NOT be SUCCESS — no real engine ran
+    expect(s.state).not.toBe('SUCCESS');
+    expect(s.activeJobId).toBeNull();
   });
 });

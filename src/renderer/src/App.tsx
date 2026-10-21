@@ -113,49 +113,27 @@ export const App: React.FC = () => {
 
   const handleExecuteDrop = (file: File, sector: RadialSector) => {
     const rawPath = window.radialAPI?.getPathForFile(file) || file.name;
-    const baseName = file.name.replace(/\.[^/.]+$/, '');
-    const outputFilename = `${baseName}.${sector.format}`;
-    const outputPath = rawPath.includes('\\')
-      ? rawPath.replace(/[^\\]+$/, outputFilename)
-      : outputFilename;
 
     const jobId = `job-${Date.now()}`;
+    const previewNote = `Preview registered (.${sector.format.toUpperCase()} target). Engine inactive in Phase 0/1 gate.`;
     const newJob: ConversionJob = {
       id: jobId,
       sourcePath: rawPath,
       sourceFileName: file.name,
       inputFormat: file.name.split('.').pop() || '',
       outputFormat: sector.format,
-      status: 'RUNNING',
+      status: 'PREVIEW_RECORDED',
       progress: 0,
       createdAt: Date.now(),
-      startedAt: Date.now(),
-      outputPath
+      engineMessage: 'Conversion engine inactive in Phase 0/1 gate. Intent recorded; source untouched.'
     };
 
     setJobs((prev) => [newJob, ...prev]);
-    dispatch({ type: 'JOB_STARTED', jobId });
-
-    // Output validation lifecycle simulation
-    setTimeout(() => {
-      setJobs((prev) =>
-        prev.map((j) =>
-          j.id === jobId
-            ? {
-                ...j,
-                status: 'SUCCEEDED',
-                progress: 100,
-                completedAt: Date.now()
-              }
-            : j
-        )
-      );
-
-      dispatch({
-        type: 'JOB_COMPLETED',
-        outputPath
-      });
-    }, 800);
+    dispatch({
+      type: 'RECORD_CONVERSION_PREVIEW',
+      targetFormat: sector.format,
+      note: previewNote
+    });
   };
 
   return (

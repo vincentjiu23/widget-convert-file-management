@@ -364,6 +364,11 @@ export const DashboardModal: React.FC<DashboardModalProps> = ({
                       <div style={{ fontSize: '11px', color: '#64748b' }}>
                         {job.outputPath || job.sourcePath}
                       </div>
+                      {job.engineMessage && (
+                        <div style={{ fontSize: '10px', color: '#d97706', marginTop: '2px', fontStyle: 'italic' }}>
+                          ⚠ {job.engineMessage}
+                        </div>
+                      )}
                     </div>
 
                     <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
@@ -373,13 +378,25 @@ export const DashboardModal: React.FC<DashboardModalProps> = ({
                           fontWeight: '700',
                           padding: '3px 8px',
                           borderRadius: '999px',
-                          background: job.status === 'SUCCEEDED' ? 'rgba(16, 185, 129, 0.15)' : 'rgba(239, 68, 68, 0.15)',
-                          color: job.status === 'SUCCEEDED' ? '#059669' : '#dc2626'
+                          background: job.status === 'SUCCEEDED'
+                            ? 'rgba(16, 185, 129, 0.15)'
+                            : job.status === 'PREVIEW_RECORDED'
+                              ? 'rgba(245, 158, 11, 0.15)'
+                              : job.status === 'FAILED'
+                                ? 'rgba(239, 68, 68, 0.15)'
+                                : 'rgba(100, 116, 139, 0.15)',
+                          color: job.status === 'SUCCEEDED'
+                            ? '#059669'
+                            : job.status === 'PREVIEW_RECORDED'
+                              ? '#d97706'
+                              : job.status === 'FAILED'
+                                ? '#dc2626'
+                                : '#64748b'
                         }}
                       >
-                        {job.status}
+                        {job.status === 'PREVIEW_RECORDED' ? 'PREVIEW' : job.status}
                       </span>
-                      {job.outputPath && window.radialAPI && (
+                      {job.status === 'SUCCEEDED' && job.outputPath && window.radialAPI && (
                         <button
                           className="btn-glass"
                           style={{ padding: '4px 8px', fontSize: '11px' }}

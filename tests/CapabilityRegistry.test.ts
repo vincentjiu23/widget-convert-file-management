@@ -49,6 +49,6 @@ describe('CapabilityRegistry Validation Suite', () => {
   it('rejects unsupported categories', () => {
     const check = validateConversionCompatibility('exe', 'png', 'unknown');
     expect(check.isSupported).toBe(false);
-    expect(check.reason).toContain('not currently supported');
+    expect(check.reason).toContain('drop the file onto the primary circle');
   });
 });

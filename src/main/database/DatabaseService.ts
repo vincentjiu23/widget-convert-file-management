@@ -49,11 +49,28 @@ export class DatabaseService {
     this.dbFilePath = dbFilePath;
   }
 
+  /**
+   * Resolves sql-wasm.wasm path across dev, test, and production packaging
+   */
+  private resolveWasmPath(): string | undefined {
+    const candidatePaths = [
+      path.join(__dirname, 'sql-wasm.wasm'),
+      path.join(__dirname, '../sql-wasm.wasm'),
+      path.resolve(__dirname, '../../node_modules/sql.js/dist/sql-wasm.wasm'),
+      path.resolve(process.cwd(), 'node_modules/sql.js/dist/sql-wasm.wasm')
+    ];
+
+    for (const p of candidatePaths) {
+      if (fs.existsSync(p)) {
+        return p;
+      }
+    }
+    return undefined;
+  }
+
   public async initialize(): Promise<void> {
-    const wasmPath = path.resolve(__dirname, '../../node_modules/sql.js/dist/sql-wasm.wasm');
-    const wasmBinary = fs.existsSync(wasmPath)
-      ? new Uint8Array(fs.readFileSync(wasmPath)).buffer
-      : undefined;
+    const wasmPath = this.resolveWasmPath();
+    const wasmBinary = wasmPath ? new Uint8Array(fs.readFileSync(wasmPath)).buffer : undefined;
 
     this.SQL = await initSqlJs({
       wasmBinary
@@ -68,9 +85,18 @@ export class DatabaseService {
       try {
         const buffer = fs.readFileSync(this.dbFilePath);
         this.db = new this.SQL.Database(buffer);
-        console.log(`[Database] Loaded existing database from ${this.dbFilePath}`);
+        // Quick integrity check
+        this.db.exec('PRAGMA integrity_check;');
+        console.log(`[Database] Loaded verified database from ${this.dbFilePath}`);
       } catch (err) {
-        console.error(`[Database] Failed to read database, initializing fresh:`, err);
+        console.error(`[Database] Database corruption detected at ${this.dbFilePath}. Creating backup and resetting:`, err);
+        try {
+          const corruptBackup = `${this.dbFilePath}.corrupt-${Date.now()}`;
+          fs.renameSync(this.dbFilePath, corruptBackup);
+          console.warn(`[Database] Corrupted database backed up to ${corruptBackup}`);
+        } catch (backupErr) {
+          console.error(`[Database] Could not rename corrupted database:`, backupErr);
+        }
         this.db = new this.SQL.Database();
       }
     } else {
@@ -188,7 +214,7 @@ export class DatabaseService {
     this.saveTimeout = setTimeout(() => {
       this.persistSync();
       this.saveTimeout = null;
-    }, 500);
+    }, 400);
   }
 
   // --- Folder Management ---
@@ -208,6 +234,29 @@ export class DatabaseService {
       scan_status: row[6] as string,
       file_count: row[7] as number
     }));
+  }
+
+  public getApprovedFolderById(folderId: string): ApprovedFolderRecord | null {
+    if (!this.db) return null;
+    const stmt = this.db.prepare(`SELECT id, path, name, enabled, added_at, last_scan_at, scan_status, file_count FROM selected_folders WHERE id = ?;`);
+    stmt.bind([folderId]);
+    if (stmt.step()) {
+      const row = stmt.get();
+      const folder: ApprovedFolderRecord = {
+        id: row[0] as string,
+        path: row[1] as string,
+        name: row[2] as string,
+        enabled: (row[3] as number) === 1,
+        added_at: row[4] as number,
+        last_scan_at: row[5] as number | null,
+        scan_status: row[6] as string,
+        file_count: row[7] as number
+      };
+      stmt.free();
+      return folder;
+    }
+    stmt.free();
+    return null;
   }
 
   public addApprovedFolder(folder: { id: string; path: string; name: string; enabled: boolean }): void {

@@ -16,8 +16,8 @@ export class FileIndexer {
   private databaseService: DatabaseService;
   private onProgressCallback?: (progress: ScanProgressEvent) => void;
   private isScanningMap: Map<string, boolean> = new Map();
+  private cancelledScans: Set<string> = new Set();
 
-  // Folders to ignore during scanning
   private ignoredDirectoryNames = new Set([
     'node_modules',
     '.git',
@@ -37,8 +37,19 @@ export class FileIndexer {
     this.onProgressCallback = onProgressCallback;
   }
 
+  public cancelScan(folderId: string): void {
+    if (this.isScanningMap.get(folderId)) {
+      this.cancelledScans.add(folderId);
+      console.log(`[Indexer] Cancellation requested for folder ${folderId}`);
+    }
+  }
+
+  public isFolderScanning(folderId: string): boolean {
+    return !!this.isScanningMap.get(folderId);
+  }
+
   /**
-   * Performs an initial recursive scan of an approved folder, storing metadata in SQLite
+   * Asynchronous, non-blocking initial scan using cooperative event loop yielding
    */
   public async initialScan(folder: ApprovedFolderRecord, maxDepth = 8): Promise<{ success: boolean; fileCount: number; error?: string }> {
     if (this.isScanningMap.get(folder.id)) {
@@ -46,6 +57,7 @@ export class FileIndexer {
     }
 
     this.isScanningMap.set(folder.id, true);
+    this.cancelledScans.delete(folder.id);
     this.databaseService.updateFolderScan(folder.id, 'SCANNING', folder.file_count || 0);
 
     let totalIndexed = 0;
@@ -57,29 +69,48 @@ export class FileIndexer {
         return { success: false, fileCount: 0, error: 'Folder does not exist on disk.' };
       }
 
-      const scanDirectory = (currentDir: string, currentDepth: number) => {
-        if (currentDepth > maxDepth) return;
+      // BFS directory queue for non-blocking asynchronous traversal
+      const dirQueue: Array<{ dirPath: string; depth: number }> = [
+        { dirPath: folder.path, depth: 0 }
+      ];
+
+      const canonicalRoot = path.resolve(folder.path).toLowerCase();
+
+      while (dirQueue.length > 0) {
+        // Check for cancellation
+        if (this.cancelledScans.has(folder.id)) {
+          console.log(`[Indexer] Scan aborted for ${folder.name}`);
+          this.databaseService.updateFolderScan(folder.id, 'CANCELLED', totalIndexed);
+          this.isScanningMap.set(folder.id, false);
+          return { success: false, fileCount: totalIndexed, error: 'SCAN_CANCELLED' };
+        }
+
+        const current = dirQueue.shift()!;
+        if (current.depth > maxDepth) continue;
 
         let entries: fs.Dirent[] = [];
         try {
-          entries = fs.readdirSync(currentDir, { withFileTypes: true });
+          entries = await fs.promises.readdir(current.dirPath, { withFileTypes: true });
         } catch (err: unknown) {
-          console.warn(`[Indexer] Could not read directory ${currentDir}:`, err);
-          return;
+          console.warn(`[Indexer] Could not read directory ${current.dirPath}:`, err);
+          continue;
         }
 
         for (const entry of entries) {
+          if (this.cancelledScans.has(folder.id)) break;
+
           const entryName = entry.name;
-          const fullPath = path.join(currentDir, entryName);
+          const fullPath = path.join(current.dirPath, entryName);
 
           if (entry.isDirectory()) {
             if (this.ignoredDirectoryNames.has(entryName.toLowerCase())) {
               continue;
             }
-            // Check symlink loop/escape
+
+            // Junction / Symlink protection: ensure realpath stays inside root
             try {
-              const real = fs.realpathSync(fullPath);
-              if (!real.startsWith(folder.path)) {
+              const real = (await fs.promises.realpath(fullPath)).toLowerCase();
+              if (real !== canonicalRoot && !real.startsWith(canonicalRoot + path.sep)) {
                 console.warn(`[Indexer] Skipping symlink target pointing outside root: ${fullPath} -> ${real}`);
                 continue;
               }
@@ -87,10 +118,10 @@ export class FileIndexer {
               continue;
             }
 
-            scanDirectory(fullPath, currentDepth + 1);
+            dirQueue.push({ dirPath: fullPath, depth: current.depth + 1 });
           } else if (entry.isFile()) {
             try {
-              const stat = fs.statSync(fullPath);
+              const stat = await fs.promises.stat(fullPath);
               const extension = extractExtension(entryName);
               const category = detectFileCategory(extension);
 
@@ -98,7 +129,7 @@ export class FileIndexer {
                 id: `fil-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
                 folder_id: folder.id,
                 path: fullPath,
-                parent_path: currentDir,
+                parent_path: current.dirPath,
                 name: entryName,
                 extension,
                 category,
@@ -112,24 +143,31 @@ export class FileIndexer {
               this.databaseService.upsertFileIndex(record);
               totalIndexed++;
 
-              if (totalIndexed % 25 === 0 && this.onProgressCallback) {
-                this.onProgressCallback({
-                  folderId: folder.id,
-                  folderPath: folder.path,
-                  scannedFiles: totalIndexed,
-                  currentPath: fullPath,
-                  isComplete: false
-                });
+              // Periodic progress report and cooperative yield
+              if (totalIndexed % 25 === 0) {
+                if (this.onProgressCallback) {
+                  this.onProgressCallback({
+                    folderId: folder.id,
+                    folderPath: folder.path,
+                    scannedFiles: totalIndexed,
+                    currentPath: fullPath,
+                    isComplete: false
+                  });
+                }
+                // Yield to event loop to keep Electron UI completely responsive
+                await new Promise((resolve) => setImmediate(resolve));
               }
             } catch (fileErr) {
               console.warn(`[Indexer] Skipping inaccessible file ${fullPath}:`, fileErr);
             }
           }
         }
-      };
 
-      scanDirectory(folder.path, 0);
+        // Cooperative yield between directories
+        await new Promise((resolve) => setImmediate(resolve));
+      }
 
+      // Persist to disk BEFORE notifying UI of completion
       this.databaseService.updateFolderScan(folder.id, 'INDEXED', totalIndexed);
       this.databaseService.persistSync();
 
@@ -198,9 +236,9 @@ export class FileIndexer {
         this.databaseService.removeFileIndex(fullPath);
       }
 
-      // Update total file count for folder
       const newCount = this.databaseService.getTotalFileCount(folderId);
       this.databaseService.updateFolderScan(folderId, 'INDEXED', newCount);
+      this.databaseService.schedulePersist();
     } catch (err) {
       console.error(`[Indexer] Error processing incremental event for ${fullPath}:`, err);
     }
@@ -215,7 +253,6 @@ export class FileIndexer {
       return { reconciled: false, updatedCount: 0 };
     }
 
-    // Run a fast incremental sweep
     const result = await this.initialScan(folder);
     if (result.success) {
       this.databaseService.updateFolderScan(folder.id, 'RECONCILED', result.fileCount);

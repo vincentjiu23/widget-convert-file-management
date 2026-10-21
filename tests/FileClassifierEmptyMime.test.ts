@@ -38,33 +38,24 @@ describe('Task B: External Drag-and-Drop & MIME Robustness Suite', () => {
     expect(docxWithoutMime.category).toBe('document');
   });
 
-  it('handles empty MIME and hidden filename during Windows Explorer dragover (fallback)', () => {
-    // During dragover from Explorer before drop, name is generic and type is empty
-    const explorerDragItem = classifyFile({ name: 'Explorer File', type: '' });
-    expect(explorerDragItem.category).toBe('generic_file');
-    expect(explorerDragItem.isMimePending).toBe(true);
-
-    // Universal format ring provides primary targets across all categories
-    const universalSectors = getCompatibleSectors('generic_file');
-    expect(universalSectors.length).toBeGreaterThanOrEqual(4);
-    const formats = universalSectors.map((s) => s.format);
-    expect(formats).toContain('png');
-    expect(formats).toContain('mp4');
-    expect(formats).toContain('pdf');
+  it('returns EMPTY sectors for generic_file (gate fix: no fake universal ring)', () => {
+    // Gate requirement: When MIME is hidden during Explorer dragover, do NOT show a
+    // fake universal format list. Show a neutral drop hint instead.
+    const neutralSectors = getCompatibleSectors('generic_file');
+    expect(neutralSectors.length).toBe(0);
+    // Ring should only appear after file identity is resolved upon actual drop
   });
 
-  it('validates drop compatibility when source was generic during drag but revealed on drop', () => {
-    // User dragged unknown file and dropped onto 'pdf' sector
-    // Upon drop, the actual file is revealed to be 'report.docx'
+  it('blocks conversion when category is still generic_file (must resolve via drop first)', () => {
+    // generic_file means identity is not yet resolved — conversion must be blocked
     const docDropCheck = validateConversionCompatibility('docx', 'pdf', 'generic_file');
-    expect(docDropCheck.isSupported).toBe(true);
-    expect(docDropCheck.targetFormat).toBe('pdf');
+    expect(docDropCheck.isSupported).toBe(false);
+    expect(docDropCheck.reason).toContain('drop the file onto the primary circle');
 
-    // User dragged unknown file and dropped onto 'pdf' sector
-    // But actual file is revealed to be 'clip.mp4' (incompatible video -> pdf)
-    const videoDropCheck = validateConversionCompatibility('mp4', 'pdf', 'generic_file');
-    expect(videoDropCheck.isSupported).toBe(false);
-    expect(videoDropCheck.reason).toContain('Target format .PDF is not compatible with video files');
+    // After resolving to actual category 'document', conversion is valid
+    const resolvedCheck = validateConversionCompatibility('docx', 'pdf', 'document');
+    expect(resolvedCheck.isSupported).toBe(true);
+    expect(resolvedCheck.targetFormat).toBe('pdf');
   });
 
   it('flags known unsupported file types (exe, zip, dll) explicitly', () => {
@@ -74,6 +65,6 @@ describe('Task B: External Drag-and-Drop & MIME Robustness Suite', () => {
 
     const exeCheck = validateConversionCompatibility('exe', 'png', 'unknown');
     expect(exeCheck.isSupported).toBe(false);
-    expect(exeCheck.reason).toContain('not currently supported');
+    expect(exeCheck.reason).toContain('drop the file onto the primary circle');
   });
 });

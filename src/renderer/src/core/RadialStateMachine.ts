@@ -21,7 +21,7 @@ export type StateMachineAction =
   | { type: 'DROP_OUTSIDE' }
   | { type: 'CANCEL_ESCAPE' }
   | { type: 'JOB_STARTED'; jobId: string }
-  | { type: 'JOB_COMPLETED'; outputPath: string }
+  | { type: 'RECORD_CONVERSION_PREVIEW'; targetFormat: string; note: string }
   | { type: 'JOB_FAILED'; error: string }
   | { type: 'RESET_IDLE' };
 
@@ -51,18 +51,30 @@ export function radialStateReducer(
         successMessage: null
       };
 
-    case 'TYPE_DETECTED':
+    case 'TYPE_DETECTED': {
+      if (action.category === 'unknown') {
+        return {
+          ...current,
+          state: 'ERROR',
+          errorMessage: 'Format not supported. Radial File Studio accepts Images, Videos, and Documents.'
+        };
+      }
+      if (action.category === 'generic_file') {
+        return {
+          ...current,
+          state: 'FILE_HOVER',
+          errorMessage: null
+        };
+      }
       return {
         ...current,
-        state: action.category === 'unknown' ? 'ERROR' : 'FORMAT_RING_VISIBLE',
-        errorMessage:
-          action.category === 'unknown'
-            ? 'Format not supported. Radial File Studio accepts Images, Videos, and Documents.'
-            : null
+        state: 'FORMAT_RING_VISIBLE',
+        errorMessage: null
       };
+    }
 
     case 'EXPAND_RING':
-      if (current.activeFile && current.activeFile.category !== 'unknown') {
+      if (current.activeFile && current.activeFile.category !== 'unknown' && current.activeFile.category !== 'generic_file') {
         return {
           ...current,
           state: 'FORMAT_RING_VISIBLE'
@@ -81,7 +93,7 @@ export function radialStateReducer(
     case 'SECTOR_LEAVE':
       return {
         ...current,
-        state: current.activeFile ? 'FORMAT_RING_VISIBLE' : 'IDLE',
+        state: current.activeFile && current.activeFile.category !== 'generic_file' ? 'FORMAT_RING_VISIBLE' : 'FILE_HOVER',
         hoveredSectorIndex: -1,
         selectedSector: null
       };
@@ -129,11 +141,11 @@ export function radialStateReducer(
         activeJobId: action.jobId
       };
 
-    case 'JOB_COMPLETED':
+    case 'RECORD_CONVERSION_PREVIEW':
       return {
         ...current,
-        state: 'SUCCESS',
-        successMessage: `Saved to ${action.outputPath}`,
+        state: 'PREVIEW_RECORDED',
+        successMessage: action.note,
         activeJobId: null
       };
 

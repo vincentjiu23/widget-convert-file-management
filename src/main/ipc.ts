@@ -11,13 +11,30 @@ export function setupIpcHandlers(
   fileIndexer: FileIndexer,
   databaseService: DatabaseService
 ): void {
+  /**
+   * Validate that the IPC event originates from the app's trusted main window.
+   * Rejects renderer frames from devtools, secondary windows, or spoofed senders.
+   */
+  function verifyIpcSender(event: Electron.IpcMainInvokeEvent): boolean {
+    const win = getMainWindow();
+    if (!win || win.isDestroyed()) return false;
+    try {
+      return event.sender === win.webContents;
+    } catch {
+      return false;
+    }
+  }
+
   // --- Folder Management & Security ---
 
   ipcMain.handle('folders:getApproved', async () => {
     return permissionRegistry.getApprovedFolders();
   });
 
-  ipcMain.handle('folders:add', async (_event, rawPath: string, name?: string) => {
+  ipcMain.handle('folders:add', async (event, rawPath: string, name?: string) => {
+    if (!verifyIpcSender(event)) {
+      return { success: false, error: 'UNAUTHORIZED: Invalid IPC sender' };
+    }
     if (typeof rawPath !== 'string') {
       return { success: false, error: 'BAD_REQUEST: Path must be a string' };
     }
@@ -33,7 +50,8 @@ export function setupIpcHandlers(
     return result;
   });
 
-  ipcMain.handle('folders:remove', async (_event, folderId: string) => {
+  ipcMain.handle('folders:remove', async (event, folderId: string) => {
+    if (!verifyIpcSender(event)) return false;
     if (typeof folderId !== 'string') return false;
     const folders = permissionRegistry.getApprovedFolders();
     const folder = folders.find((f) => f.id === folderId);
@@ -43,7 +61,8 @@ export function setupIpcHandlers(
     return permissionRegistry.removeFolder(folderId);
   });
 
-  ipcMain.handle('folders:toggle', async (_event, folderId: string, enabled: boolean) => {
+  ipcMain.handle('folders:toggle', async (event, folderId: string, enabled: boolean) => {
+    if (!verifyIpcSender(event)) return false;
     if (typeof folderId !== 'string' || typeof enabled !== 'boolean') return false;
     const folders = permissionRegistry.getApprovedFolders();
     const folder = folders.find((f) => f.id === folderId);
@@ -58,7 +77,8 @@ export function setupIpcHandlers(
     return true;
   });
 
-  ipcMain.handle('folders:rescan', async (_event, folderId: string) => {
+  ipcMain.handle('folders:rescan', async (event, folderId: string) => {
+    if (!verifyIpcSender(event)) return { success: false, error: 'UNAUTHORIZED' };
     if (typeof folderId !== 'string') return { success: false, error: 'BAD_REQUEST' };
     const folders = permissionRegistry.getApprovedFolders();
     const folder = folders.find((f) => f.id === folderId);
@@ -108,7 +128,8 @@ export function setupIpcHandlers(
 
   // --- Safe File Operations with Path Containment Validation ---
 
-  ipcMain.handle('shell:openPath', async (_event, targetPath: string) => {
+  ipcMain.handle('shell:openPath', async (event, targetPath: string) => {
+    if (!verifyIpcSender(event)) return false;
     if (!targetPath || typeof targetPath !== 'string') return false;
 
     // Validate path containment
@@ -122,7 +143,8 @@ export function setupIpcHandlers(
     return res === '';
   });
 
-  ipcMain.handle('shell:showItemInFolder', async (_event, targetPath: string) => {
+  ipcMain.handle('shell:showItemInFolder', async (event, targetPath: string) => {
+    if (!verifyIpcSender(event)) return false;
     if (!targetPath || typeof targetPath !== 'string') return false;
 
     const validation = permissionRegistry.isPathWithinApprovedFolder(targetPath);
