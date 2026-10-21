@@ -49,7 +49,7 @@ if (!gotTheLock) {
     });
 
     // Initialize Image Conversion Engine
-    imageConverter = new ImageConverter(databaseService);
+    imageConverter = new ImageConverter(databaseService, permissionRegistry);
 
     // Initialize Native Windows Watcher
     watcherService = new DirectoryWatcherService(

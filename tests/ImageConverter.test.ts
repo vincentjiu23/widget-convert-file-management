@@ -13,7 +13,7 @@ describe('ImageConverter Engine - Real Image Conversion MVP', () => {
   let converter: ImageConverter;
 
   beforeEach(async () => {
-    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'radial-img-test-'));
+    tempDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'radial-img-test-')));
     dbPath = path.join(tempDir, 'test.db');
     dbService = new DatabaseService(dbPath);
     await dbService.initialize();

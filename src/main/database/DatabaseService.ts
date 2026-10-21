@@ -80,12 +80,15 @@ export class DatabaseService {
    */
   private resolveWasmPath(): string | undefined {
     const currentDir = getDirname();
+    const resourcesPath = (process as unknown as { resourcesPath?: string }).resourcesPath;
     const candidatePaths = [
       path.join(currentDir, 'sql-wasm.wasm'),
       path.join(currentDir, '../sql-wasm.wasm'),
+      resourcesPath ? path.join(resourcesPath, 'app.asar.unpacked/node_modules/sql.js/dist/sql-wasm.wasm') : '',
+      resourcesPath ? path.join(resourcesPath, 'sql-wasm.wasm') : '',
       path.resolve(currentDir, '../../node_modules/sql.js/dist/sql-wasm.wasm'),
       path.resolve(process.cwd(), 'node_modules/sql.js/dist/sql-wasm.wasm')
-    ];
+    ].filter(Boolean);
 
     for (const p of candidatePaths) {
       if (fs.existsSync(p)) {

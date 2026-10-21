@@ -225,9 +225,10 @@ export function setupIpcHandlers(
     const cleanSource = sourcePath.trim();
 
     // Verify source path exists and validate canonical realpath
+    let realSource: string;
     try {
-      const real = await fs.promises.realpath(cleanSource);
-      const stat = await fs.promises.stat(real);
+      realSource = await fs.promises.realpath(cleanSource);
+      const stat = await fs.promises.stat(realSource);
       if (!stat.isFile()) {
         return { success: false, error: 'BAD_REQUEST: Source path is not a file' };
       }
@@ -236,6 +237,13 @@ export function setupIpcHandlers(
         success: false,
         error: `FILE_ACCESS_ERROR: Cannot access source file: ${err instanceof Error ? err.message : String(err)}`
       };
+    }
+
+    // IPC boundary: source must be within an approved folder
+    const sourceValidation = permissionRegistry.isPathWithinApprovedFolder(realSource);
+    if (!sourceValidation.isValid) {
+      console.warn(`[Security Alert] Blocked conversion of file outside approved scope: ${realSource}`);
+      return { success: false, error: 'SECURITY_VIOLATION: Source file is not within approved folders.' };
     }
 
     // Parse options safely without trusting renderer
@@ -249,14 +257,20 @@ export function setupIpcHandlers(
         safeOpts.backgroundColor = opt.backgroundColor.trim();
       }
       if (typeof opt.outputDirectory === 'string' && opt.outputDirectory.trim()) {
-        safeOpts.outputDirectory = opt.outputDirectory.trim();
+        // IPC boundary: validate output directory against approved folders
+        const outDirValidation = permissionRegistry.isPathWithinApprovedFolder(opt.outputDirectory.trim());
+        if (!outDirValidation.isValid) {
+          console.warn(`[Security Alert] Blocked output to unapproved directory: ${opt.outputDirectory}`);
+          return { success: false, error: 'SECURITY_VIOLATION: Output directory is not within approved folders.' };
+        }
+        safeOpts.outputDirectory = outDirValidation.canonicalPath;
       }
       if (typeof opt.customFilename === 'string' && opt.customFilename.trim()) {
         safeOpts.customFilename = path.basename(opt.customFilename.trim());
       }
     }
 
-    return imageConverter.convertImage(cleanSource, targetFormat.trim(), safeOpts);
+    return imageConverter.convertImage(realSource, targetFormat.trim(), safeOpts);
   });
 
   ipcMain.handle('conversion:getImageMetadata', async (event, sourcePath: unknown) => {
@@ -264,7 +278,22 @@ export function setupIpcHandlers(
     if (typeof sourcePath !== 'string' || !sourcePath.trim()) {
       throw new Error('BAD_REQUEST: sourcePath must be a non-empty string');
     }
-    return imageConverter.getImageMetadata(sourcePath.trim());
+
+    // Validate source path against approved folders
+    const cleanSource = sourcePath.trim();
+    let realSource: string;
+    try {
+      realSource = await fs.promises.realpath(cleanSource);
+    } catch {
+      throw new Error(`FILE_ACCESS_ERROR: Cannot resolve source path: ${cleanSource}`);
+    }
+
+    const validation = permissionRegistry.isPathWithinApprovedFolder(realSource);
+    if (!validation.isValid) {
+      throw new Error('SECURITY_VIOLATION: Source file is not within approved folders.');
+    }
+
+    return imageConverter.getImageMetadata(realSource);
   });
 
   ipcMain.handle('conversion:getJobs', async (event, limit?: unknown) => {

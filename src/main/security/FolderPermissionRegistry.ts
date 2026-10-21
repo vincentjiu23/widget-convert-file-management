@@ -101,13 +101,16 @@ export class FolderPermissionRegistry {
     }
 
     // Verify directory exists on disk and check reparse point target
+    let resolvedCanonical: string;
     try {
       const stat = fs.statSync(canonical);
       if (!stat.isDirectory()) {
         return { success: false, error: 'NOT_A_DIRECTORY: Specified path is not a directory' };
       }
       const real = fs.realpathSync(canonical);
-      const realSysCheck = this.isSystemOrRootPath(this.canonicalize(real));
+      // Use the realpath-resolved canonical form to handle Windows 8.3 short name discrepancies
+      resolvedCanonical = this.canonicalize(real);
+      const realSysCheck = this.isSystemOrRootPath(resolvedCanonical);
       if (realSysCheck.isForbidden) {
         return {
           success: false,
@@ -120,11 +123,11 @@ export class FolderPermissionRegistry {
     }
 
     const folderId = `fld-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-    const folderName = name || path.basename(canonical) || canonical;
+    const folderName = name || path.basename(resolvedCanonical) || resolvedCanonical;
 
     this.databaseService.addApprovedFolder({
       id: folderId,
-      path: canonical,
+      path: resolvedCanonical,
       name: folderName,
       enabled: true
     });
@@ -133,11 +136,11 @@ export class FolderPermissionRegistry {
       event_type: 'FOLDER_ADDED',
       resource_type: 'FOLDER',
       resource_id: folderId,
-      summary: `Approved folder added: ${folderName} (${canonical})`
+      summary: `Approved folder added: ${folderName} (${resolvedCanonical})`
     });
 
     this.refreshCache();
-    const created = this.cachedApprovedFolders.get(canonical.toLowerCase());
+    const created = this.cachedApprovedFolders.get(resolvedCanonical.toLowerCase());
     return { success: true, folder: created };
   }
 
@@ -186,44 +189,72 @@ export class FolderPermissionRegistry {
 
     const lowerTarget = canonicalTarget.toLowerCase();
 
+    // On Windows, fs.realpathSync and fs.promises.realpath may return different path forms
+    // (8.3 short name vs long name). Resolve the target via sync realpath for consistent comparison.
+    let resolvedTarget: string | null = null;
+    let lowerResolved: string | null = null;
+    if (fs.existsSync(canonicalTarget)) {
+      try {
+        resolvedTarget = this.canonicalize(fs.realpathSync(canonicalTarget));
+        lowerResolved = resolvedTarget.toLowerCase();
+      } catch {
+        // If realpathSync fails, fall through to canonical-only check
+      }
+    }
+
     for (const approved of this.cachedApprovedFolders.values()) {
       if (!approved.enabled) continue;
 
       const canonicalApproved = this.canonicalize(approved.path);
       const lowerApproved = canonicalApproved.toLowerCase();
 
+      // Also resolve approved folder via realpathSync for consistent comparison
+      let lowerApprovedResolved: string | null = null;
+      if (fs.existsSync(canonicalApproved)) {
+        try {
+          lowerApprovedResolved = this.canonicalize(fs.realpathSync(canonicalApproved)).toLowerCase();
+        } catch {
+          // Fall through
+        }
+      }
+
       // Case-insensitive exact match or subpath prefix check
-      if (
+      // Check both canonical forms AND resolved (realpathSync) forms
+      const canonicalMatch =
         lowerTarget === lowerApproved ||
-        lowerTarget.startsWith(lowerApproved + path.sep)
-      ) {
+        lowerTarget.startsWith(lowerApproved + path.sep);
+
+      const resolvedMatch =
+        lowerResolved != null &&
+        lowerApprovedResolved != null &&
+        (lowerResolved === lowerApprovedResolved ||
+          lowerResolved.startsWith(lowerApprovedResolved + path.sep));
+
+      // Also check cross-form: target-canonical vs approved-resolved and vice versa
+      const crossMatch =
+        (lowerApprovedResolved != null &&
+          (lowerTarget === lowerApprovedResolved ||
+            lowerTarget.startsWith(lowerApprovedResolved + path.sep))) ||
+        (lowerResolved != null &&
+          (lowerResolved === lowerApproved ||
+            lowerResolved.startsWith(lowerApproved + path.sep)));
+
+      if (canonicalMatch || resolvedMatch || crossMatch) {
         // Reparse Point / Junction / Symlink safety check:
         // Ensure resolved realpath does not point outside the approved root!
-        if (fs.existsSync(canonicalTarget)) {
-          try {
-            const realTarget = fs.realpathSync(canonicalTarget);
-            const lowerReal = this.canonicalize(realTarget).toLowerCase();
-            const lowerApprovedReal = fs.existsSync(canonicalApproved)
-              ? this.canonicalize(fs.realpathSync(canonicalApproved)).toLowerCase()
-              : lowerApproved;
+        if (resolvedTarget && lowerResolved) {
+          const approvedReal = lowerApprovedResolved || lowerApproved;
 
-            if (
-              lowerReal !== lowerApprovedReal &&
-              !lowerReal.startsWith(lowerApprovedReal + path.sep) &&
-              lowerReal !== lowerApproved &&
-              !lowerReal.startsWith(lowerApproved + path.sep)
-            ) {
-              return {
-                isValid: false,
-                canonicalPath: canonicalTarget,
-                error: 'SECURITY_VIOLATION: Symlink or junction points outside approved folder scope.'
-              };
-            }
-          } catch {
+          if (
+            lowerResolved !== approvedReal &&
+            !lowerResolved.startsWith(approvedReal + path.sep) &&
+            lowerResolved !== lowerApproved &&
+            !lowerResolved.startsWith(lowerApproved + path.sep)
+          ) {
             return {
               isValid: false,
               canonicalPath: canonicalTarget,
-              error: 'SECURITY_VIOLATION: Cannot safely resolve canonical realpath.'
+              error: 'SECURITY_VIOLATION: Symlink or junction points outside approved folder scope.'
             };
           }
         }

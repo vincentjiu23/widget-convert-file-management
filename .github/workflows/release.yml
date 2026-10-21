@@ -1,0 +1,121 @@
+name: Build & Release Windows App
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      draft:
+        description: 'Create draft release'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    name: Build & Package Windows (x64)
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+
+      - name: Install dependencies (clean lockfile install)
+        run: npm ci
+
+      - name: Run automated test suite
+        run: npm test
+
+      - name: Generate high-resolution icons
+        run: node scripts/generate-icons.js
+
+      - name: Compile TypeScript & Vite bundles
+        run: npm run build
+
+      - name: Package Windows Installer & Portable EXE
+        run: npx electron-builder --win nsis portable --x64
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute SHA256 Checksums
+        shell: pwsh
+        run: |
+          Get-ChildItem -Path release -Filter "*.exe" | ForEach-Object {
+            $hash = (Get-FileHash -Path $_.FullName -Algorithm SHA256).Hash
+            "$hash  $($_.Name)" | Out-File -FilePath release/SHA256SUMS.txt -Append -Encoding utf8
+          }
+          Get-Content release/SHA256SUMS.txt
+
+      - name: Upload build artifacts to GitHub Actions
+        uses: actions/upload-artifact@v4
+        with:
+          name: radial-file-studio-windows-x64
+          path: |
+            release/*.exe
+            release/*.blockmap
+            release/SHA256SUMS.txt
+          retention-days: 14
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: 'Radial File Studio ${{ github.ref_name }}'
+          draft: ${{ inputs.draft || false }}
+          prerelease: false
+          files: |
+            release/*.exe
+            release/*.blockmap
+            release/SHA256SUMS.txt
+          body: |
+            ## Radial File Studio ${{ github.ref_name }}
+            
+            Floating glassmorphic radial desktop converter and local file manager for Windows 10/11.
+
+            ### 📦 Download Assets
+            - **Installer (Recommended):** `Radial File Studio-Setup-${{ github.ref_name }}.exe` (Full NSIS Setup with Start Menu and Desktop shortcuts)
+            - **Portable:** `Radial File Studio-Portable-${{ github.ref_name }}.exe` (Standalone single-executable, no install required)
+            - **Checksums:** `SHA256SUMS.txt`
+
+            ---
+
+            ### ✨ Key Features in this Release
+            - **Floating Radial Glassmorphic Widget:** Fast file access, radial segment interactions, and file management directly from your desktop.
+            - **Real Image Conversion Engine:** High-performance, local image conversion powered by native `sharp` and `libvips` with full alpha flattening and quality controls.
+              - **Supported Formats:** PNG, JPEG, WebP, BMP, and TIFF.
+            - **Conversion Security Hardening:**
+              - **Atomic Finalization:** Uses kernel-level hard link (`link`) publication to prevent partial writes and TOCTOU races.
+              - **Zero-Trust Destination Guard:** Never overwrites source files or existing targets; collision names automatically increment (`filename (1).ext`).
+              - **Directory Traversal & Scope Protection:** Rejects unauthorized paths and arbitrary directory creation.
+              - **Anti-DoS & Resource Limits:** Strict limits on source file size (50MB), BMP memory (30MB), resolution (16,384px), and maximum pixels (40 Megapixels).
+              - **Concurrency Control:** Limits heavy concurrent image conversions to protect CPU/memory.
+            - **SQLite Activity & Index Tracking:** Local SQLite database tracks conversion history, approved folder permissions, and indexed files safely in the user data directory.
+
+            ---
+
+            ### 💻 System Requirements
+            - **OS:** Windows 10 (64-bit) or Windows 11 (64-bit)
+            - **Architecture:** x86_64 (x64)
+
+            ---
+
+            ### ⚠️ Code Signing & Windows SmartScreen Notice
+            > **Note on Windows SmartScreen:** This installer is currently unsigned (built directly via GitHub Actions open-source release pipeline). On first launch, Windows SmartScreen may show a prompt saying *"Windows protected your PC"*.
+            >
+            > To proceed:
+            > 1. Click **More info**.
+            > 2. Click **Run anyway**.
+            >
+            > You can verify the integrity of the downloaded executable against the published `SHA256SUMS.txt`.
