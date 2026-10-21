@@ -88,6 +88,9 @@ export function setupIpcHandlers(
     permissionRegistry.toggleFolder(folderId, enabled);
     if (enabled) {
       watcherService.watch(folder.path, folder.id);
+      fileIndexer.reconcileFolder(folder).catch((err) => {
+        console.error('[IPC] Reconciliation error upon folder re-enable:', err);
+      });
     } else {
       watcherService.unwatch(folder.path);
     }

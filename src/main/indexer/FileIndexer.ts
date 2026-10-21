@@ -12,6 +12,14 @@ export interface ScanProgressEvent {
   error?: string;
 }
 
+export interface ScanResult {
+  success: boolean;
+  isPartial: boolean;
+  fileCount: number;
+  scanStatus: 'INDEXED' | 'PARTIAL_INDEXED' | 'CANCELLED' | 'ERROR';
+  error?: string;
+}
+
 export class FileIndexer {
   private databaseService: DatabaseService;
   private onProgressCallback?: (progress: ScanProgressEvent) => void;
@@ -51,9 +59,15 @@ export class FileIndexer {
   /**
    * Asynchronous, non-blocking initial scan using cooperative event loop yielding
    */
-  public async initialScan(folder: ApprovedFolderRecord, maxDepth = 8): Promise<{ success: boolean; fileCount: number; error?: string }> {
+  public async initialScan(folder: ApprovedFolderRecord, maxDepth = 8): Promise<ScanResult> {
     if (this.isScanningMap.get(folder.id)) {
-      return { success: false, fileCount: 0, error: 'Scan already in progress for this folder.' };
+      return {
+        success: false,
+        isPartial: true,
+        fileCount: 0,
+        scanStatus: 'ERROR',
+        error: 'Scan already in progress for this folder.'
+      };
     }
 
     this.isScanningMap.set(folder.id, true);
@@ -66,7 +80,13 @@ export class FileIndexer {
       if (!fs.existsSync(folder.path)) {
         this.databaseService.updateFolderScan(folder.id, 'ERROR_NOT_FOUND', 0);
         this.isScanningMap.set(folder.id, false);
-        return { success: false, fileCount: 0, error: 'Folder does not exist on disk.' };
+        return {
+          success: false,
+          isPartial: true,
+          fileCount: 0,
+          scanStatus: 'ERROR',
+          error: 'Folder does not exist on disk.'
+        };
       }
 
       // BFS directory queue for non-blocking asynchronous traversal
@@ -76,6 +96,9 @@ export class FileIndexer {
 
       const canonicalRoot = path.resolve(folder.path).toLowerCase();
       const visitedFilePaths = new Set<string>();
+      const scannedDirectories = new Set<string>();
+      let hadDirectoryErrors = false;
+      let reachedMaxDepth = false;
       let batchBuffer: FileIndexRecord[] = [];
 
       while (dirQueue.length > 0) {
@@ -89,17 +112,29 @@ export class FileIndexer {
           }
           this.databaseService.updateFolderScan(folder.id, 'CANCELLED', totalIndexed);
           this.isScanningMap.set(folder.id, false);
-          return { success: false, fileCount: totalIndexed, error: 'SCAN_CANCELLED' };
+          return {
+            success: false,
+            isPartial: true,
+            fileCount: totalIndexed,
+            scanStatus: 'CANCELLED',
+            error: 'SCAN_CANCELLED'
+          };
         }
 
         const current = dirQueue.shift()!;
-        if (current.depth > maxDepth) continue;
+        if (current.depth > maxDepth) {
+          reachedMaxDepth = true;
+          continue;
+        }
 
         let entries: fs.Dirent[] = [];
         try {
           entries = await fs.promises.readdir(current.dirPath, { withFileTypes: true });
+          // Successfully read directory without error: record as verified scanned directory
+          scannedDirectories.add(path.resolve(current.dirPath).toLowerCase());
         } catch (err: unknown) {
-          console.warn(`[Indexer] Could not read directory ${current.dirPath}:`, err);
+          hadDirectoryErrors = true;
+          console.warn(`[Indexer] Could not read directory ${current.dirPath} (permission denied or I/O error):`, err);
           continue;
         }
 
@@ -147,7 +182,7 @@ export class FileIndexer {
                 index_status: 'INDEXED'
               };
 
-              visitedFilePaths.add(fullPath);
+              visitedFilePaths.add(path.resolve(fullPath).toLowerCase());
               batchBuffer.push(record);
               totalIndexed++;
 
@@ -184,20 +219,27 @@ export class FileIndexer {
         batchBuffer = [];
       }
 
-      // Reconcile deleted files: purge any records in DB for this folder that were removed on disk
-      this.databaseService.purgeMissingFilesForFolder(folder.id, visitedFilePaths);
+      // Safe Reconcile: Purge deleted files ONLY within directories that were successfully scanned.
+      // Unscanned, skipped, or failed directories retain their existing database records!
+      this.databaseService.purgeMissingFilesForScannedDirectories(
+        folder.id,
+        scannedDirectories,
+        visitedFilePaths
+      );
 
       const finalCount = this.databaseService.getTotalFileCount(folder.id);
+      const isPartial = hadDirectoryErrors || reachedMaxDepth;
+      const scanStatus = hadDirectoryErrors ? 'PARTIAL_INDEXED' : 'INDEXED';
 
       // Persist to disk BEFORE notifying UI of completion
-      this.databaseService.updateFolderScan(folder.id, 'INDEXED', finalCount);
+      this.databaseService.updateFolderScan(folder.id, scanStatus, finalCount);
       this.databaseService.persistSync();
 
       this.databaseService.logActivity({
-        event_type: 'INITIAL_SCAN_COMPLETED',
+        event_type: isPartial ? 'PARTIAL_SCAN_COMPLETED' : 'INITIAL_SCAN_COMPLETED',
         resource_type: 'FOLDER',
         resource_id: folder.id,
-        summary: `Scan completed for ${folder.name}: ${finalCount} files indexed.`
+        summary: `Scan completed for ${folder.name}: ${finalCount} files indexed (${scanStatus}).`
       });
 
       if (this.onProgressCallback) {
@@ -211,12 +253,23 @@ export class FileIndexer {
       }
 
       this.isScanningMap.set(folder.id, false);
-      return { success: true, fileCount: finalCount };
+      return {
+        success: !hadDirectoryErrors,
+        isPartial,
+        fileCount: finalCount,
+        scanStatus
+      };
     } catch (err: unknown) {
       const errorMsg = err instanceof Error ? err.message : String(err);
       this.databaseService.updateFolderScan(folder.id, 'ERROR', totalIndexed);
       this.isScanningMap.set(folder.id, false);
-      return { success: false, fileCount: totalIndexed, error: errorMsg };
+      return {
+        success: false,
+        isPartial: true,
+        fileCount: totalIndexed,
+        scanStatus: 'ERROR',
+        error: errorMsg
+      };
     }
   }
 
@@ -317,9 +370,11 @@ export class FileIndexer {
     }
 
     const result = await this.initialScan(folder);
-    if (result.success) {
+    if (result.success && !result.isPartial) {
       this.databaseService.updateFolderScan(folder.id, 'RECONCILED', result.fileCount);
+    } else if (result.isPartial) {
+      this.databaseService.updateFolderScan(folder.id, 'PARTIAL_INDEXED', result.fileCount);
     }
-    return { reconciled: result.success, updatedCount: result.fileCount };
+    return { reconciled: result.success && !result.isPartial, updatedCount: result.fileCount };
   }
 }

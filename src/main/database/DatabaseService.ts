@@ -363,14 +363,26 @@ export class DatabaseService {
   }
 
   public removeFileIndexOrDirectory(targetPath: string): void {
-    if (!this.db) return;
-    const sep = path.sep;
-    const prefix = targetPath.endsWith(sep) ? targetPath : `${targetPath}${sep}`;
+    if (!this.db || !targetPath) return;
+    const cleanPath = targetPath.replace(/[/\\]+$/, '');
+    const prefixBackslash = `${cleanPath}\\`;
+    const prefixSlash = `${cleanPath}/`;
+
+    // Safe against SQL wildcard interpretation of % and _ in path names,
+    // and strictly prevents deleting sibling folders with matching prefixes (e.g. C:\Folder vs C:\Folder2).
     const stmt = this.db.prepare(`
       DELETE FROM file_index_entries 
-      WHERE path = ? OR path LIKE ? || '%';
+      WHERE path = ? 
+         OR SUBSTR(path, 1, ?) = ? 
+         OR SUBSTR(path, 1, ?) = ?;
     `);
-    stmt.run([targetPath, prefix]);
+    stmt.run([
+      cleanPath,
+      prefixBackslash.length,
+      prefixBackslash,
+      prefixSlash.length,
+      prefixSlash
+    ]);
     stmt.free();
     this.schedulePersist();
   }
@@ -385,6 +397,56 @@ export class DatabaseService {
     }
     stmt.free();
     return paths;
+  }
+
+  /**
+   * Safely purges deleted files ONLY within directories that were fully and successfully scanned.
+   * Directories skipped due to maxDepth, exclusion lists, or permission errors are NEVER purged.
+   */
+  public purgeMissingFilesForScannedDirectories(
+    folderId: string,
+    scannedDirectories: Set<string>,
+    validFilePaths: Set<string>
+  ): number {
+    if (!this.db || scannedDirectories.size === 0) return 0;
+    const stmt = this.db.prepare(`SELECT path, parent_path FROM file_index_entries WHERE folder_id = ?;`);
+    stmt.bind([folderId]);
+    const toDelete: string[] = [];
+    while (stmt.step()) {
+      const row = stmt.get();
+      const filePath = row[0] as string;
+      const parentPath = row[1] as string;
+      const canonicalParent = path.resolve(parentPath).toLowerCase();
+      const canonicalFile = path.resolve(filePath).toLowerCase();
+
+      // Only purge if the containing directory was fully and successfully scanned
+      if (scannedDirectories.has(canonicalParent)) {
+        if (!validFilePaths.has(canonicalFile)) {
+          toDelete.push(filePath);
+        }
+      }
+    }
+    stmt.free();
+
+    if (toDelete.length === 0) return 0;
+
+    this.db.run('BEGIN TRANSACTION;');
+    try {
+      const delStmt = this.db.prepare(`DELETE FROM file_index_entries WHERE folder_id = ? AND path = ?;`);
+      for (const p of toDelete) {
+        delStmt.run([folderId, p]);
+      }
+      delStmt.free();
+      this.db.run('COMMIT;');
+    } catch (err) {
+      this.db.run('ROLLBACK;');
+      console.error('[Database] Failed to purge missing files for folder:', err);
+      return 0;
+    }
+
+    const newCount = this.getTotalFileCount(folderId);
+    this.schedulePersist();
+    return toDelete.length;
   }
 
   public purgeMissingFilesForFolder(folderId: string, validPaths: Set<string>): number {
