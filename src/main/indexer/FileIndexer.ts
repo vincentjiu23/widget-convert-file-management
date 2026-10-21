@@ -96,8 +96,10 @@ export class FileIndexer {
 
       const canonicalRoot = path.resolve(folder.path).toLowerCase();
       const visitedFilePaths = new Set<string>();
+      const unverifiedFilePaths = new Set<string>();
       const scannedDirectories = new Set<string>();
       let hadDirectoryErrors = false;
+      let hadFileErrors = false;
       let reachedMaxDepth = false;
       let batchBuffer: FileIndexRecord[] = [];
 
@@ -204,6 +206,8 @@ export class FileIndexer {
                 await new Promise((resolve) => setImmediate(resolve));
               }
             } catch (fileErr) {
+              hadFileErrors = true;
+              unverifiedFilePaths.add(path.resolve(fullPath).toLowerCase());
               console.warn(`[Indexer] Skipping inaccessible file ${fullPath}:`, fileErr);
             }
           }
@@ -221,15 +225,17 @@ export class FileIndexer {
 
       // Safe Reconcile: Purge deleted files ONLY within directories that were successfully scanned.
       // Unscanned, skipped, or failed directories retain their existing database records!
+      // Files whose metadata could not be read (stat error / lock) are preserved in unverifiedFilePaths!
       this.databaseService.purgeMissingFilesForScannedDirectories(
         folder.id,
         scannedDirectories,
-        visitedFilePaths
+        visitedFilePaths,
+        unverifiedFilePaths
       );
 
       const finalCount = this.databaseService.getTotalFileCount(folder.id);
-      const isPartial = hadDirectoryErrors || reachedMaxDepth;
-      const scanStatus = hadDirectoryErrors ? 'PARTIAL_INDEXED' : 'INDEXED';
+      const isPartial = hadDirectoryErrors || reachedMaxDepth || hadFileErrors;
+      const scanStatus = isPartial ? 'PARTIAL_INDEXED' : 'INDEXED';
 
       // Persist to disk BEFORE notifying UI of completion
       this.databaseService.updateFolderScan(folder.id, scanStatus, finalCount);
@@ -254,7 +260,7 @@ export class FileIndexer {
 
       this.isScanningMap.set(folder.id, false);
       return {
-        success: !hadDirectoryErrors,
+        success: !isPartial,
         isPartial,
         fileCount: finalCount,
         scanStatus

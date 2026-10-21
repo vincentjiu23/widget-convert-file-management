@@ -87,6 +87,12 @@ describe('Part A & C: Final Index Integrity and Watcher Recovery Suite', () => {
     // Step 2: Now re-scan with maxDepth = 0 (only root directory, lvl1 and lvl2 skipped!)
     const shallowScan = await indexer.initialScan(folderRec, 0);
     expect(shallowScan.isPartial).toBe(true);
+    expect(shallowScan.scanStatus).toBe('PARTIAL_INDEXED');
+    expect(shallowScan.success).toBe(false);
+
+    // Verify folder status in database is PARTIAL_INDEXED, NOT INDEXED
+    const updatedFolder = db.getApprovedFolderById('f-depth');
+    expect(updatedFolder?.scan_status).toBe('PARTIAL_INDEXED');
 
     // Verify: Records for level1 and level2 MUST BE RETAINED, NOT purged!
     const allFiles = db.getFileIndexEntries('f-depth');
@@ -95,6 +101,63 @@ describe('Part A & C: Final Index Integrity and Watcher Recovery Suite', () => {
     expect(paths).toContain(f1);
     expect(paths).toContain(f2);
     expect(allFiles.length).toBe(3);
+  });
+
+  it('retains records when a file stat() fails and reports PARTIAL_INDEXED status without purging the file', async () => {
+    const f1 = path.join(testDir, 'accessible.txt');
+    const fLocked = path.join(testDir, 'locked.txt');
+    fs.writeFileSync(f1, 'accessible content');
+    fs.writeFileSync(fLocked, 'locked content');
+
+    const folderRec = {
+      id: 'f-stat-err',
+      path: testDir,
+      name: 'Stat Error Test',
+      enabled: true,
+      added_at: Date.now(),
+      last_scan_at: null,
+      scan_status: 'PENDING',
+      file_count: 0
+    };
+    db.addApprovedFolder(folderRec);
+    registry.refreshCache();
+
+    // Initial full scan: both files successfully indexed
+    const initialScan = await indexer.initialScan(folderRec);
+    expect(initialScan.success).toBe(true);
+    expect(initialScan.scanStatus).toBe('INDEXED');
+    expect(db.getTotalFileCount('f-stat-err')).toBe(2);
+
+    // Now simulate fs.promises.stat failing on locked.txt (e.g. EACCES or file lock)
+    const originalStat = fs.promises.stat;
+    const statSpy = vi.spyOn(fs.promises, 'stat').mockImplementation((async (filePath: any, opts: any) => {
+      if (typeof filePath === 'string' && filePath.includes('locked.txt')) {
+        const err = new Error('EACCES: permission denied') as any;
+        err.code = 'EACCES';
+        throw err;
+      }
+      return (originalStat as any)(filePath, opts);
+    }) as any);
+
+    try {
+      const res = await indexer.initialScan(folderRec);
+      expect(res.success).toBe(false);
+      expect(res.isPartial).toBe(true);
+      expect(res.scanStatus).toBe('PARTIAL_INDEXED');
+
+      // Verify folder status in database is PARTIAL_INDEXED, NOT INDEXED
+      const updatedFolder = db.getApprovedFolderById('f-stat-err');
+      expect(updatedFolder?.scan_status).toBe('PARTIAL_INDEXED');
+
+      // Verify the locked file's existing record is RETAINED, NOT purged!
+      const files = db.getFileIndexEntries('f-stat-err');
+      const paths = files.map((f) => f.path);
+      expect(paths).toContain(fLocked);
+      expect(paths).toContain(f1);
+      expect(files.length).toBe(2);
+    } finally {
+      statSpy.mockRestore();
+    }
   });
 
   it('retains records when a subdirectory fails to read and reports PARTIAL_INDEXED status', async () => {

@@ -402,11 +402,13 @@ export class DatabaseService {
   /**
    * Safely purges deleted files ONLY within directories that were fully and successfully scanned.
    * Directories skipped due to maxDepth, exclusion lists, or permission errors are NEVER purged.
+   * Files whose metadata could not be read (stat failure / lock) are preserved in unverifiedFilePaths.
    */
   public purgeMissingFilesForScannedDirectories(
     folderId: string,
     scannedDirectories: Set<string>,
-    validFilePaths: Set<string>
+    validFilePaths: Set<string>,
+    unverifiedFilePaths: Set<string> = new Set()
   ): number {
     if (!this.db || scannedDirectories.size === 0) return 0;
     const stmt = this.db.prepare(`SELECT path, parent_path FROM file_index_entries WHERE folder_id = ?;`);
@@ -419,9 +421,10 @@ export class DatabaseService {
       const canonicalParent = path.resolve(parentPath).toLowerCase();
       const canonicalFile = path.resolve(filePath).toLowerCase();
 
-      // Only purge if the containing directory was fully and successfully scanned
+      // Only purge if the containing directory was fully and successfully scanned,
+      // AND the file was neither successfully visited nor unverified due to stat error
       if (scannedDirectories.has(canonicalParent)) {
-        if (!validFilePaths.has(canonicalFile)) {
+        if (!validFilePaths.has(canonicalFile) && !unverifiedFilePaths.has(canonicalFile)) {
           toDelete.push(filePath);
         }
       }
