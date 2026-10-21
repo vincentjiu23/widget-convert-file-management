@@ -275,4 +275,103 @@ describe('Async FileIndexer', () => {
     // Must warn and skip out-of-root symlinks
     expect(source).toContain('pointing outside root');
   });
+
+  it('purges deleted files from database on reconcile / rescan (offline changes)', async () => {
+    indexer = new FileIndexer(db);
+
+    const folderRec = {
+      id: 'f-reconcile',
+      path: testDir,
+      name: 'Reconcile Test',
+      enabled: true,
+      added_at: Date.now(),
+      last_scan_at: null,
+      scan_status: 'PENDING',
+      file_count: 0
+    };
+    db.addApprovedFolder(folderRec);
+
+    // Initial scan indexes 4 files
+    const res1 = await indexer.initialScan(folderRec);
+    expect(res1.fileCount).toBe(4);
+    expect(db.getTotalFileCount('f-reconcile')).toBe(4);
+
+    // Simulate file deletion on disk while app was closed
+    const fileToDelete = path.join(testDir, 'photo.jpg');
+    fs.unlinkSync(fileToDelete);
+
+    // Run reconcile
+    const res2 = await indexer.reconcileFolder(folderRec);
+    expect(res2.reconciled).toBe(true);
+    expect(res2.updatedCount).toBe(3);
+
+    // Verify database purged the deleted file
+    expect(db.getTotalFileCount('f-reconcile')).toBe(3);
+    const files = db.getFileIndexEntries('f-reconcile');
+    const hasDeleted = files.some((f) => f.path === fileToDelete);
+    expect(hasDeleted).toBe(false);
+  });
+
+  it('handles incremental events for directory creation and recursive deletion', async () => {
+    indexer = new FileIndexer(db);
+    db.addApprovedFolder({
+      id: 'f-incr',
+      path: testDir,
+      name: 'Incr Test',
+      enabled: true
+    });
+
+    // 1. Create a new subfolder with files
+    const newSubDir = path.join(testDir, 'dynamic_folder');
+    fs.mkdirSync(newSubDir, { recursive: true });
+    const dynamicFile1 = path.join(newSubDir, 'doc1.pdf');
+    const dynamicFile2 = path.join(newSubDir, 'doc2.txt');
+    fs.writeFileSync(dynamicFile1, 'data1');
+    fs.writeFileSync(dynamicFile2, 'data2');
+
+    // Trigger incremental event for the directory
+    await indexer.handleIncrementalEvent('f-incr', testDir, 'rename', 'dynamic_folder');
+
+    // Check files inside directory were indexed
+    const filesAfterAdd = db.getFileIndexEntries('f-incr');
+    const hasDoc1 = filesAfterAdd.some((f) => f.path === dynamicFile1);
+    expect(hasDoc1).toBe(true);
+
+    // 2. Delete the dynamic_folder
+    fs.rmSync(newSubDir, { recursive: true, force: true });
+    await indexer.handleIncrementalEvent('f-incr', testDir, 'rename', 'dynamic_folder');
+
+    // Verify all children under dynamic_folder were deleted from index
+    const filesAfterDelete = db.getFileIndexEntries('f-incr');
+    const stillHasDoc1 = filesAfterDelete.some((f) => f.path === dynamicFile1);
+    expect(stillHasDoc1).toBe(false);
+  });
+
+  it('uses transaction batching during initial scan for large directories', async () => {
+    // Generate 60 small files to trigger at least one batch threshold (batch size 50)
+    const batchDir = path.join(testDir, 'batch_test');
+    fs.mkdirSync(batchDir, { recursive: true });
+    for (let i = 0; i < 60; i++) {
+      fs.writeFileSync(path.join(batchDir, `file_${i}.txt`), `content ${i}`);
+    }
+
+    indexer = new FileIndexer(db);
+    const folderRec = {
+      id: 'f-batch',
+      path: testDir,
+      name: 'Batch Test',
+      enabled: true,
+      added_at: Date.now(),
+      last_scan_at: null,
+      scan_status: 'PENDING',
+      file_count: 0
+    };
+    db.addApprovedFolder(folderRec);
+
+    const result = await indexer.initialScan(folderRec);
+    expect(result.success).toBe(true);
+    // 4 base files + 60 batch files = 64 files
+    expect(result.fileCount).toBeGreaterThanOrEqual(64);
+    expect(db.getTotalFileCount('f-batch')).toBe(result.fileCount);
+  });
 });

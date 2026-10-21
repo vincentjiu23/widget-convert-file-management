@@ -75,11 +75,18 @@ export class FileIndexer {
       ];
 
       const canonicalRoot = path.resolve(folder.path).toLowerCase();
+      const visitedFilePaths = new Set<string>();
+      let batchBuffer: FileIndexRecord[] = [];
 
       while (dirQueue.length > 0) {
         // Check for cancellation
         if (this.cancelledScans.has(folder.id)) {
           console.log(`[Indexer] Scan aborted for ${folder.name}`);
+          // Flush any buffered items before aborting
+          if (batchBuffer.length > 0) {
+            this.databaseService.upsertFileIndexBatch(batchBuffer);
+            batchBuffer = [];
+          }
           this.databaseService.updateFolderScan(folder.id, 'CANCELLED', totalIndexed);
           this.isScanningMap.set(folder.id, false);
           return { success: false, fileCount: totalIndexed, error: 'SCAN_CANCELLED' };
@@ -140,11 +147,15 @@ export class FileIndexer {
                 index_status: 'INDEXED'
               };
 
-              this.databaseService.upsertFileIndex(record);
+              visitedFilePaths.add(fullPath);
+              batchBuffer.push(record);
               totalIndexed++;
 
-              // Periodic progress report and cooperative yield
-              if (totalIndexed % 25 === 0) {
+              // Batch insert into SQLite every 50 records to minimize IPC and DB lock duration
+              if (batchBuffer.length >= 50) {
+                this.databaseService.upsertFileIndexBatch(batchBuffer);
+                batchBuffer = [];
+
                 if (this.onProgressCallback) {
                   this.onProgressCallback({
                     folderId: folder.id,
@@ -154,7 +165,7 @@ export class FileIndexer {
                     isComplete: false
                   });
                 }
-                // Yield to event loop to keep Electron UI completely responsive
+                // Cooperative yield to keep Electron main process and UI completely responsive
                 await new Promise((resolve) => setImmediate(resolve));
               }
             } catch (fileErr) {
@@ -167,29 +178,40 @@ export class FileIndexer {
         await new Promise((resolve) => setImmediate(resolve));
       }
 
+      // Flush remaining items
+      if (batchBuffer.length > 0) {
+        this.databaseService.upsertFileIndexBatch(batchBuffer);
+        batchBuffer = [];
+      }
+
+      // Reconcile deleted files: purge any records in DB for this folder that were removed on disk
+      this.databaseService.purgeMissingFilesForFolder(folder.id, visitedFilePaths);
+
+      const finalCount = this.databaseService.getTotalFileCount(folder.id);
+
       // Persist to disk BEFORE notifying UI of completion
-      this.databaseService.updateFolderScan(folder.id, 'INDEXED', totalIndexed);
+      this.databaseService.updateFolderScan(folder.id, 'INDEXED', finalCount);
       this.databaseService.persistSync();
 
       this.databaseService.logActivity({
         event_type: 'INITIAL_SCAN_COMPLETED',
         resource_type: 'FOLDER',
         resource_id: folder.id,
-        summary: `Scan completed for ${folder.name}: ${totalIndexed} files indexed.`
+        summary: `Scan completed for ${folder.name}: ${finalCount} files indexed.`
       });
 
       if (this.onProgressCallback) {
         this.onProgressCallback({
           folderId: folder.id,
           folderPath: folder.path,
-          scannedFiles: totalIndexed,
+          scannedFiles: finalCount,
           currentPath: folder.path,
           isComplete: true
         });
       }
 
       this.isScanningMap.set(folder.id, false);
-      return { success: true, fileCount: totalIndexed };
+      return { success: true, fileCount: finalCount };
     } catch (err: unknown) {
       const errorMsg = err instanceof Error ? err.message : String(err);
       this.databaseService.updateFolderScan(folder.id, 'ERROR', totalIndexed);
@@ -201,14 +223,22 @@ export class FileIndexer {
   /**
    * Handles incremental events emitted by the native filesystem watcher
    */
-  public handleIncrementalEvent(folderId: string, folderRoot: string, eventType: string, relativeOrFileName: string): void {
+  public async handleIncrementalEvent(folderId: string, folderRoot: string, eventType: string, relativeOrFileName: string): Promise<void> {
     const fullPath = path.isAbsolute(relativeOrFileName)
-      ? relativeOrFileName
-      : path.join(folderRoot, relativeOrFileName);
+      ? path.normalize(relativeOrFileName)
+      : path.normalize(path.join(folderRoot, relativeOrFileName));
+
+    // Security check: ensure path is within folderRoot
+    const canonicalRoot = path.resolve(folderRoot).toLowerCase();
+    const canonicalTarget = path.resolve(fullPath).toLowerCase();
+    if (canonicalTarget !== canonicalRoot && !canonicalTarget.startsWith(canonicalRoot + path.sep)) {
+      console.warn(`[Indexer] Blocked out-of-scope incremental event path: ${fullPath}`);
+      return;
+    }
 
     try {
       if (fs.existsSync(fullPath)) {
-        const stat = fs.statSync(fullPath);
+        const stat = await fs.promises.stat(fullPath);
         if (stat.isFile()) {
           const name = path.basename(fullPath);
           const extension = extractExtension(name);
@@ -230,10 +260,43 @@ export class FileIndexer {
           };
 
           this.databaseService.upsertFileIndex(record);
+        } else if (stat.isDirectory()) {
+          // If a directory was created/modified, index any immediate files inside
+          try {
+            const subEntries = await fs.promises.readdir(fullPath, { withFileTypes: true });
+            const batch: FileIndexRecord[] = [];
+            for (const sub of subEntries) {
+              if (sub.isFile()) {
+                const subPath = path.join(fullPath, sub.name);
+                try {
+                  const subStat = await fs.promises.stat(subPath);
+                  const subExt = extractExtension(sub.name);
+                  batch.push({
+                    id: `fil-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+                    folder_id: folderId,
+                    path: subPath,
+                    parent_path: fullPath,
+                    name: sub.name,
+                    extension: subExt,
+                    category: detectFileCategory(subExt),
+                    size_bytes: subStat.size,
+                    mtime_ms: subStat.mtimeMs,
+                    ctime_ms: subStat.ctimeMs,
+                    indexed_at: Date.now(),
+                    index_status: 'INDEXED'
+                  });
+                } catch {}
+              }
+            }
+            if (batch.length > 0) {
+              this.databaseService.upsertFileIndexBatch(batch);
+            }
+          } catch {}
         }
       } else {
-        // File removed or renamed away
-        this.databaseService.removeFileIndex(fullPath);
+        // File or directory removed or renamed away:
+        // Use removeFileIndexOrDirectory so all children of a deleted folder are also removed
+        this.databaseService.removeFileIndexOrDirectory(fullPath);
       }
 
       const newCount = this.databaseService.getTotalFileCount(folderId);

@@ -53,7 +53,8 @@ export class DirectoryWatcherService {
       const watcher = fs.watch(canonical, { recursive: true }, (eventType, filename) => {
         if (!filename) return;
 
-        const key = `${canonical}:${filename}:${eventType}`;
+        // Debounce by filename (case-insensitive for Windows) to collapse rapid duplicate rename & change events
+        const key = `${canonical}:${filename.toString().toLowerCase()}`;
         if (this.debounceTimers.has(key)) {
           clearTimeout(this.debounceTimers.get(key));
         }

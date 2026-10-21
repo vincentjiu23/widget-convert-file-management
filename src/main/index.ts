@@ -62,11 +62,14 @@ if (!gotTheLock) {
       databaseService
     );
 
-    // Automatically restore active watchers for enabled approved folders
+    // Automatically restore active watchers for enabled approved folders and reconcile offline changes
     const approvedFolders = permissionRegistry.getApprovedFolders();
     for (const folder of approvedFolders) {
       if (folder.enabled) {
         watcherService.watch(folder.path, folder.id);
+        fileIndexer.reconcileFolder(folder).catch((err) => {
+          console.warn(`[Startup] Background reconciliation failed for ${folder.name}:`, err);
+        });
       }
     }
 

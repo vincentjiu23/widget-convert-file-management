@@ -100,11 +100,19 @@ export class FolderPermissionRegistry {
       return { success: false, error: `SECURITY_VIOLATION: ${sysCheck.reason}` };
     }
 
-    // Verify directory exists on disk
+    // Verify directory exists on disk and check reparse point target
     try {
       const stat = fs.statSync(canonical);
       if (!stat.isDirectory()) {
         return { success: false, error: 'NOT_A_DIRECTORY: Specified path is not a directory' };
+      }
+      const real = fs.realpathSync(canonical);
+      const realSysCheck = this.isSystemOrRootPath(this.canonicalize(real));
+      if (realSysCheck.isForbidden) {
+        return {
+          success: false,
+          error: `SECURITY_VIOLATION: Target folder symlink/junction points to prohibited system path (${realSysCheck.reason})`
+        };
       }
     } catch (err: unknown) {
       const errorMsg = err instanceof Error ? err.message : String(err);
@@ -195,7 +203,13 @@ export class FolderPermissionRegistry {
           try {
             const realTarget = fs.realpathSync(canonicalTarget);
             const lowerReal = this.canonicalize(realTarget).toLowerCase();
+            const lowerApprovedReal = fs.existsSync(canonicalApproved)
+              ? this.canonicalize(fs.realpathSync(canonicalApproved)).toLowerCase()
+              : lowerApproved;
+
             if (
+              lowerReal !== lowerApprovedReal &&
+              !lowerReal.startsWith(lowerApprovedReal + path.sep) &&
               lowerReal !== lowerApproved &&
               !lowerReal.startsWith(lowerApproved + path.sep)
             ) {
@@ -206,7 +220,11 @@ export class FolderPermissionRegistry {
               };
             }
           } catch {
-            // File might be transient or unreadable
+            return {
+              isValid: false,
+              canonicalPath: canonicalTarget,
+              error: 'SECURITY_VIOLATION: Cannot safely resolve canonical realpath.'
+            };
           }
         }
 

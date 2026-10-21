@@ -94,25 +94,33 @@ describe('IPC Contract: Preload ↔ Main Handler Parity', () => {
     }
   });
 
-  it('sender validation (verifyIpcSender) is present on mutating handlers', () => {
-    const mutatingChannels = [
+  it('sender validation (verifyIpcSender) is present on ALL IPC channels (handles and listeners)', () => {
+    const allChannels = [
+      'folders:getApproved',
       'folders:add',
       'folders:remove',
       'folders:toggle',
       'folders:rescan',
+      'index:query',
+      'index:stats',
+      'activity:getLogs',
+      'dialog:openDirectory',
       'shell:openPath',
-      'shell:showItemInFolder'
+      'shell:showItemInFolder',
+      'window:setIgnoreMouseEvents',
+      'window:minimize',
+      'window:close'
     ];
 
-    for (const ch of mutatingChannels) {
+    for (const ch of allChannels) {
       // Find the handler block and check it contains verifyIpcSender
       const handlerRe = new RegExp(
-        `ipcMain\\.handle\\(\\s*'${ch.replace(':', '\\:')}[\\s\\S]*?verifyIpcSender`,
+        `ipcMain\\.(handle|on)\\(\\s*'${ch.replace(':', '\\:')}'[\\s\\S]*?verifyIpcSender`,
         'm'
       );
       expect(
         handlerRe.test(ipcSource),
-        `Handler '${ch}' should call verifyIpcSender`
+        `Handler or listener for channel '${ch}' MUST call verifyIpcSender`
       ).toBe(true);
     }
   });

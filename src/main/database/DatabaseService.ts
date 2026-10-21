@@ -1,6 +1,15 @@
 import fs from 'fs';
 import path from 'path';
+import { fileURLToPath } from 'url';
 import initSqlJs, { Database, SqlJsStatic } from 'sql.js';
+
+const getDirname = (): string => {
+  try {
+    return path.dirname(fileURLToPath(import.meta.url));
+  } catch {
+    return process.cwd();
+  }
+};
 
 export interface ApprovedFolderRecord {
   id: string;
@@ -53,10 +62,11 @@ export class DatabaseService {
    * Resolves sql-wasm.wasm path across dev, test, and production packaging
    */
   private resolveWasmPath(): string | undefined {
+    const currentDir = getDirname();
     const candidatePaths = [
-      path.join(__dirname, 'sql-wasm.wasm'),
-      path.join(__dirname, '../sql-wasm.wasm'),
-      path.resolve(__dirname, '../../node_modules/sql.js/dist/sql-wasm.wasm'),
+      path.join(currentDir, 'sql-wasm.wasm'),
+      path.join(currentDir, '../sql-wasm.wasm'),
+      path.resolve(currentDir, '../../node_modules/sql.js/dist/sql-wasm.wasm'),
       path.resolve(process.cwd(), 'node_modules/sql.js/dist/sql-wasm.wasm')
     ];
 
@@ -306,28 +316,41 @@ export class DatabaseService {
   // --- File Indexing ---
 
   public upsertFileIndex(entry: FileIndexRecord): void {
-    if (!this.db) return;
-    const stmt = this.db.prepare(`
-      INSERT OR REPLACE INTO file_index_entries
-      (id, folder_id, path, parent_path, name, extension, category, size_bytes, mtime_ms, ctime_ms, indexed_at, index_status, error_message)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
-    `);
-    stmt.run([
-      entry.id,
-      entry.folder_id,
-      entry.path,
-      entry.parent_path,
-      entry.name,
-      entry.extension,
-      entry.category,
-      entry.size_bytes,
-      entry.mtime_ms,
-      entry.ctime_ms,
-      entry.indexed_at,
-      entry.index_status,
-      entry.error_message || null
-    ]);
-    stmt.free();
+    this.upsertFileIndexBatch([entry]);
+  }
+
+  public upsertFileIndexBatch(entries: FileIndexRecord[]): void {
+    if (!this.db || entries.length === 0) return;
+    this.db.run('BEGIN TRANSACTION;');
+    try {
+      const stmt = this.db.prepare(`
+        INSERT OR REPLACE INTO file_index_entries
+        (id, folder_id, path, parent_path, name, extension, category, size_bytes, mtime_ms, ctime_ms, indexed_at, index_status, error_message)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+      `);
+      for (const entry of entries) {
+        stmt.run([
+          entry.id,
+          entry.folder_id,
+          entry.path,
+          entry.parent_path,
+          entry.name,
+          entry.extension,
+          entry.category,
+          entry.size_bytes,
+          entry.mtime_ms,
+          entry.ctime_ms,
+          entry.indexed_at,
+          entry.index_status,
+          entry.error_message || null
+        ]);
+      }
+      stmt.free();
+      this.db.run('COMMIT;');
+    } catch (err) {
+      this.db.run('ROLLBACK;');
+      console.error('[Database] Failed to batch upsert file index:', err);
+    }
     this.schedulePersist();
   }
 
@@ -337,6 +360,57 @@ export class DatabaseService {
     stmt.run([filePath]);
     stmt.free();
     this.schedulePersist();
+  }
+
+  public removeFileIndexOrDirectory(targetPath: string): void {
+    if (!this.db) return;
+    const sep = path.sep;
+    const prefix = targetPath.endsWith(sep) ? targetPath : `${targetPath}${sep}`;
+    const stmt = this.db.prepare(`
+      DELETE FROM file_index_entries 
+      WHERE path = ? OR path LIKE ? || '%';
+    `);
+    stmt.run([targetPath, prefix]);
+    stmt.free();
+    this.schedulePersist();
+  }
+
+  public getExistingFilePathsForFolder(folderId: string): string[] {
+    if (!this.db) return [];
+    const stmt = this.db.prepare(`SELECT path FROM file_index_entries WHERE folder_id = ?;`);
+    stmt.bind([folderId]);
+    const paths: string[] = [];
+    while (stmt.step()) {
+      paths.push(stmt.get()[0] as string);
+    }
+    stmt.free();
+    return paths;
+  }
+
+  public purgeMissingFilesForFolder(folderId: string, validPaths: Set<string>): number {
+    if (!this.db) return 0;
+    const existing = this.getExistingFilePathsForFolder(folderId);
+    const toDelete = existing.filter((p) => !validPaths.has(p));
+    if (toDelete.length === 0) return 0;
+
+    this.db.run('BEGIN TRANSACTION;');
+    try {
+      const stmt = this.db.prepare(`DELETE FROM file_index_entries WHERE folder_id = ? AND path = ?;`);
+      for (const p of toDelete) {
+        stmt.run([folderId, p]);
+      }
+      stmt.free();
+      this.db.run('COMMIT;');
+    } catch (err) {
+      this.db.run('ROLLBACK;');
+      console.error('[Database] Failed to purge missing files for folder:', err);
+      return 0;
+    }
+
+    const newCount = this.getTotalFileCount(folderId);
+    this.updateFolderScan(folderId, 'INDEXED', newCount);
+    this.schedulePersist();
+    return toDelete.length;
   }
 
   public getFileIndexEntries(folderId?: string, limit = 100, offset = 0, query = ''): FileIndexRecord[] {
