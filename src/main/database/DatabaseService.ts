@@ -48,6 +48,23 @@ export interface ActivityEventRecord {
   details_json?: string;
 }
 
+export interface ConversionJobRecord {
+  id: string;
+  source_path: string;
+  source_filename: string;
+  input_format: string;
+  output_format: string;
+  output_path?: string | null;
+  status: 'QUEUED' | 'RUNNING' | 'SUCCEEDED' | 'FAILED' | 'CANCELLED';
+  progress: number;
+  created_at: number;
+  started_at?: number | null;
+  completed_at?: number | null;
+  duration_ms?: number | null;
+  error_code?: string | null;
+  error_message?: string | null;
+}
+
 export class DatabaseService {
   private db: Database | null = null;
   private SQL: SqlJsStatic | null = null;
@@ -356,7 +373,7 @@ export class DatabaseService {
 
   public removeFileIndex(filePath: string): void {
     if (!this.db) return;
-    const stmt = this.db.prepare(`DELETE FROM file_index_entries WHERE path = ?;`);
+    const stmt = this.db.prepare(`DELETE FROM file_index_entries WHERE path = ? COLLATE NOCASE;`);
     stmt.run([filePath]);
     stmt.free();
     this.schedulePersist();
@@ -369,12 +386,13 @@ export class DatabaseService {
     const prefixSlash = `${cleanPath}/`;
 
     // Safe against SQL wildcard interpretation of % and _ in path names,
-    // and strictly prevents deleting sibling folders with matching prefixes (e.g. C:\Folder vs C:\Folder2).
+    // strictly prevents deleting sibling folders with matching prefixes (e.g. C:\Folder vs C:\Folder2),
+    // and enforces Windows-consistent case-insensitive path comparison via COLLATE NOCASE.
     const stmt = this.db.prepare(`
       DELETE FROM file_index_entries 
-      WHERE path = ? 
-         OR SUBSTR(path, 1, ?) = ? 
-         OR SUBSTR(path, 1, ?) = ?;
+      WHERE path = ? COLLATE NOCASE
+         OR SUBSTR(path, 1, ?) = ? COLLATE NOCASE
+         OR SUBSTR(path, 1, ?) = ? COLLATE NOCASE;
     `);
     stmt.run([
       cleanPath,
@@ -587,6 +605,130 @@ export class DatabaseService {
     }
     stmt.free();
     return logs;
+  }
+
+  // --- Conversion Jobs ---
+
+  public insertConversionJob(job: ConversionJobRecord): void {
+    if (!this.db) return;
+    const stmt = this.db.prepare(`
+      INSERT INTO conversion_jobs (
+        id, source_path, source_filename, input_format, output_format,
+        output_path, status, progress, created_at, started_at, completed_at,
+        duration_ms, error_code, error_message
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+    `);
+    stmt.run([
+      job.id,
+      job.source_path,
+      job.source_filename,
+      job.input_format,
+      job.output_format,
+      job.output_path || null,
+      job.status,
+      job.progress,
+      job.created_at,
+      job.started_at || null,
+      job.completed_at || null,
+      job.duration_ms || null,
+      job.error_code || null,
+      job.error_message || null
+    ]);
+    stmt.free();
+    this.schedulePersist();
+  }
+
+  public updateConversionJob(
+    jobId: string,
+    updates: Partial<Omit<ConversionJobRecord, 'id'>>
+  ): void {
+    if (!this.db) return;
+    const fields: string[] = [];
+    const values: any[] = [];
+
+    for (const [key, val] of Object.entries(updates)) {
+      fields.push(`${key} = ?`);
+      values.push(val === undefined ? null : val);
+    }
+
+    if (fields.length === 0) return;
+    values.push(jobId);
+
+    const sql = `UPDATE conversion_jobs SET ${fields.join(', ')} WHERE id = ?;`;
+    const stmt = this.db.prepare(sql);
+    stmt.run(values);
+    stmt.free();
+    this.schedulePersist();
+  }
+
+  public getConversionJobs(limit = 50): ConversionJobRecord[] {
+    if (!this.db) return [];
+    const stmt = this.db.prepare(`
+      SELECT id, source_path, source_filename, input_format, output_format,
+             output_path, status, progress, created_at, started_at, completed_at,
+             duration_ms, error_code, error_message
+      FROM conversion_jobs
+      ORDER BY created_at DESC
+      LIMIT ?;
+    `);
+    stmt.bind([limit]);
+    const jobs: ConversionJobRecord[] = [];
+    while (stmt.step()) {
+      const row = stmt.get();
+      jobs.push({
+        id: row[0] as string,
+        source_path: row[1] as string,
+        source_filename: row[2] as string,
+        input_format: row[3] as string,
+        output_format: row[4] as string,
+        output_path: (row[5] as string) || null,
+        status: row[6] as any,
+        progress: row[7] as number,
+        created_at: row[8] as number,
+        started_at: (row[9] as number) || null,
+        completed_at: (row[10] as number) || null,
+        duration_ms: (row[11] as number) || null,
+        error_code: (row[12] as string) || null,
+        error_message: (row[13] as string) || null
+      });
+    }
+    stmt.free();
+    return jobs;
+  }
+
+  public getConversionJobById(jobId: string): ConversionJobRecord | null {
+    if (!this.db) return null;
+    const stmt = this.db.prepare(`
+      SELECT id, source_path, source_filename, input_format, output_format,
+             output_path, status, progress, created_at, started_at, completed_at,
+             duration_ms, error_code, error_message
+      FROM conversion_jobs
+      WHERE id = ?;
+    `);
+    stmt.bind([jobId]);
+    if (stmt.step()) {
+      const row = stmt.get();
+      const job: ConversionJobRecord = {
+        id: row[0] as string,
+        source_path: row[1] as string,
+        source_filename: row[2] as string,
+        input_format: row[3] as string,
+        output_format: row[4] as string,
+        output_path: (row[5] as string) || null,
+        status: row[6] as any,
+        progress: row[7] as number,
+        created_at: row[8] as number,
+        started_at: (row[9] as number) || null,
+        completed_at: (row[10] as number) || null,
+        duration_ms: (row[11] as number) || null,
+        error_code: (row[12] as string) || null,
+        error_message: (row[13] as string) || null
+      };
+      stmt.free();
+      return job;
+    }
+    stmt.free();
+    return null;
   }
 
   public close(): void {

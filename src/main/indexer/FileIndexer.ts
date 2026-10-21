@@ -57,7 +57,27 @@ export class FileIndexer {
   }
 
   /**
-   * Asynchronous, non-blocking initial scan using cooperative event loop yielding
+   * Asynchronous, non-blocking initial scan using cooperative event loop yielding.
+   *
+   * Directory Categorization & Integrity Policy:
+   * 1. Successfully scanned directories:
+   *    - Successfully read via fs.promises.readdir and added to scannedDirectories.
+   *    - Reconciled during purge: missing files are safely removed only within these directories.
+   * 2. Policy-excluded directories (e.g. node_modules, .git, .cache):
+   *    - Intentionally excluded by configuration, not considered an error.
+   *    - Does not mark the scan as PARTIAL_INDEXED if all required areas were scanned.
+   * 3. Unreadable directories (permission denied EACCES / I/O errors):
+   *    - Sets hadDirectoryErrors = true.
+   *    - Results in scanStatus: 'PARTIAL_INDEXED' and success: false.
+   *    - Existing database records for unread directories are preserved and NEVER purged.
+   * 4. Directories failing realpath() verification (broken junctions / cyclic links / locks):
+   *    - Sets hadDirectoryErrors = true.
+   *    - Results in scanStatus: 'PARTIAL_INDEXED' and success: false.
+   *    - Not added to scannedDirectories; pre-existing database records are retained.
+   * 5. Symlinks / junctions pointing outside approved root:
+   *    - Enforces strict security boundary: skipped immediately and never traversed.
+   * 6. Cancelled or failed scans:
+   *    - Marked as 'CANCELLED' or 'ERROR'. Purge reconcile is bypassed completely.
    */
   public async initialScan(folder: ApprovedFolderRecord, maxDepth = 8): Promise<ScanResult> {
     if (this.isScanningMap.get(folder.id)) {

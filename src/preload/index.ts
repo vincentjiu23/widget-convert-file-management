@@ -61,6 +61,18 @@ const radialAPI: RadialAPI = {
     return ipcRenderer.invoke('activity:getLogs', limit);
   },
 
+  convertImage: async (sourcePath: string, targetFormat: string, options?: { quality?: number; backgroundColor?: string; outputDirectory?: string }) => {
+    return ipcRenderer.invoke('conversion:convertImage', sourcePath, targetFormat, options);
+  },
+
+  getImageMetadata: async (sourcePath: string) => {
+    return ipcRenderer.invoke('conversion:getImageMetadata', sourcePath);
+  },
+
+  getConversionJobs: async (limit = 50) => {
+    return ipcRenderer.invoke('conversion:getJobs', limit);
+  },
+
   setIgnoreMouseEvents: (ignore: boolean, forward?: boolean): void => {
     ipcRenderer.send('window:setIgnoreMouseEvents', ignore, forward);
   },

@@ -8,9 +8,9 @@ import {
 describe('CapabilityRegistry Validation Suite', () => {
   it('returns valid sector configurations for image category', () => {
     const sectors = getCompatibleSectors('image');
-    expect(sectors.length).toBe(4);
+    expect(sectors.length).toBe(5);
     const formats = sectors.map(s => s.format);
-    expect(formats).toEqual(['png', 'jpg', 'webp', 'bmp']);
+    expect(formats).toEqual(['png', 'jpg', 'webp', 'bmp', 'tiff']);
   });
 
   it('returns valid sector configurations for video category', () => {

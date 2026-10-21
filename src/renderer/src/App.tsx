@@ -41,6 +41,9 @@ export const App: React.FC = () => {
 
         const files = await window.radialAPI.queryIndex(undefined, 100, 0, searchQuery);
         setIndexedFiles(files);
+
+        const dbJobs = await window.radialAPI.getConversionJobs(50);
+        setJobs(dbJobs);
       } catch (err) {
         console.error('[App] Failed to load data from backend:', err);
       }
@@ -111,29 +114,58 @@ export const App: React.FC = () => {
     }
   };
 
-  const handleExecuteDrop = (file: File, sector: RadialSector) => {
+  const handleExecuteDrop = async (file: File, sector: RadialSector) => {
     const rawPath = window.radialAPI?.getPathForFile(file) || file.name;
-
     const jobId = `job-${Date.now()}`;
-    const previewNote = `Preview registered (.${sector.format.toUpperCase()} target). Engine inactive in Phase 0/1 gate.`;
-    const newJob: ConversionJob = {
-      id: jobId,
-      sourcePath: rawPath,
-      sourceFileName: file.name,
-      inputFormat: file.name.split('.').pop() || '',
-      outputFormat: sector.format,
-      status: 'PREVIEW_RECORDED',
-      progress: 0,
-      createdAt: Date.now(),
-      engineMessage: 'Conversion engine inactive in Phase 0/1 gate. Intent recorded; source untouched.'
-    };
 
-    setJobs((prev) => [newJob, ...prev]);
-    dispatch({
-      type: 'RECORD_CONVERSION_PREVIEW',
-      targetFormat: sector.format,
-      note: previewNote
-    });
+    if (sector.category === 'image' && window.radialAPI?.convertImage) {
+      dispatch({ type: 'JOB_STARTED', jobId });
+
+      try {
+        const result = await window.radialAPI.convertImage(rawPath, sector.format);
+        if (result.success && result.outputPath) {
+          dispatch({
+            type: 'JOB_COMPLETED',
+            outputPath: result.outputPath,
+            message: `Converted to .${sector.format.toUpperCase()}: ${result.outputPath.split(/[/\\]/).pop()}`
+          });
+          loadData();
+        } else {
+          dispatch({
+            type: 'JOB_FAILED',
+            error: result.error || 'Conversion failed.'
+          });
+          loadData();
+        }
+      } catch (err: unknown) {
+        dispatch({
+          type: 'JOB_FAILED',
+          error: err instanceof Error ? err.message : String(err)
+        });
+        loadData();
+      }
+    } else {
+      // Future engines (video, document)
+      const previewNote = `Preview registered (.${sector.format.toUpperCase()} target). Conversion engine active for Images.`;
+      const newJob: ConversionJob = {
+        id: jobId,
+        sourcePath: rawPath,
+        sourceFileName: file.name,
+        inputFormat: file.name.split('.').pop() || '',
+        outputFormat: sector.format,
+        status: 'PREVIEW_RECORDED',
+        progress: 0,
+        createdAt: Date.now(),
+        engineMessage: previewNote
+      };
+
+      setJobs((prev) => [newJob, ...prev]);
+      dispatch({
+        type: 'RECORD_CONVERSION_PREVIEW',
+        targetFormat: sector.format,
+        note: previewNote
+      });
+    }
   };
 
   return (

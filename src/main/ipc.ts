@@ -1,8 +1,11 @@
+import fs from 'fs';
+import path from 'path';
 import { ipcMain, dialog, shell, BrowserWindow } from 'electron';
 import { FolderPermissionRegistry } from './security/FolderPermissionRegistry';
 import { DirectoryWatcherService } from './watcher';
 import { FileIndexer } from './indexer/FileIndexer';
 import { DatabaseService } from './database/DatabaseService';
+import { ImageConverter, ImageConversionOptions } from './converter/ImageConverter';
 
 /**
  * Validate that an IPC event originates strictly from the app's trusted main window.
@@ -32,7 +35,8 @@ export function setupIpcHandlers(
   permissionRegistry: FolderPermissionRegistry,
   watcherService: DirectoryWatcherService,
   fileIndexer: FileIndexer,
-  databaseService: DatabaseService
+  databaseService: DatabaseService,
+  imageConverter: ImageConverter
 ): void {
   function verifyIpcSender(event: Electron.IpcMainInvokeEvent | Electron.IpcMainEvent): boolean {
     return isTrustedIpcSender(event, getMainWindow());
@@ -201,6 +205,90 @@ export function setupIpcHandlers(
 
     shell.showItemInFolder(validation.canonicalPath);
     return true;
+  });
+
+  // --- Real Image Conversion Engine Handlers ---
+
+  ipcMain.handle('conversion:convertImage', async (event, sourcePath: unknown, targetFormat: unknown, options?: unknown) => {
+    if (!verifyIpcSender(event)) {
+      return { success: false, error: 'UNAUTHORIZED: Invalid IPC sender' };
+    }
+
+    if (typeof sourcePath !== 'string' || !sourcePath.trim()) {
+      return { success: false, error: 'BAD_REQUEST: sourcePath must be a non-empty string' };
+    }
+
+    if (typeof targetFormat !== 'string' || !targetFormat.trim()) {
+      return { success: false, error: 'BAD_REQUEST: targetFormat must be a non-empty string' };
+    }
+
+    const cleanSource = sourcePath.trim();
+
+    // Verify source path exists and validate canonical realpath
+    try {
+      const real = await fs.promises.realpath(cleanSource);
+      const stat = await fs.promises.stat(real);
+      if (!stat.isFile()) {
+        return { success: false, error: 'BAD_REQUEST: Source path is not a file' };
+      }
+    } catch (err: unknown) {
+      return {
+        success: false,
+        error: `FILE_ACCESS_ERROR: Cannot access source file: ${err instanceof Error ? err.message : String(err)}`
+      };
+    }
+
+    // Parse options safely without trusting renderer
+    const safeOpts: ImageConversionOptions = {};
+    if (options && typeof options === 'object') {
+      const opt = options as Record<string, unknown>;
+      if (typeof opt.quality === 'number' && Number.isFinite(opt.quality)) {
+        safeOpts.quality = Math.max(1, Math.min(100, Math.floor(opt.quality)));
+      }
+      if (typeof opt.backgroundColor === 'string' && /^#[0-9a-fA-F]{3,8}$/.test(opt.backgroundColor.trim())) {
+        safeOpts.backgroundColor = opt.backgroundColor.trim();
+      }
+      if (typeof opt.outputDirectory === 'string' && opt.outputDirectory.trim()) {
+        safeOpts.outputDirectory = opt.outputDirectory.trim();
+      }
+      if (typeof opt.customFilename === 'string' && opt.customFilename.trim()) {
+        safeOpts.customFilename = path.basename(opt.customFilename.trim());
+      }
+    }
+
+    return imageConverter.convertImage(cleanSource, targetFormat.trim(), safeOpts);
+  });
+
+  ipcMain.handle('conversion:getImageMetadata', async (event, sourcePath: unknown) => {
+    if (!verifyIpcSender(event)) throw new Error('UNAUTHORIZED: Invalid IPC sender');
+    if (typeof sourcePath !== 'string' || !sourcePath.trim()) {
+      throw new Error('BAD_REQUEST: sourcePath must be a non-empty string');
+    }
+    return imageConverter.getImageMetadata(sourcePath.trim());
+  });
+
+  ipcMain.handle('conversion:getJobs', async (event, limit?: unknown) => {
+    if (!verifyIpcSender(event)) return [];
+    const safeLimit = typeof limit === 'number' && Number.isFinite(limit) && limit > 0
+      ? Math.min(Math.floor(limit), 200)
+      : 50;
+    const records = databaseService.getConversionJobs(safeLimit);
+    return records.map((r) => ({
+      id: r.id,
+      sourcePath: r.source_path,
+      sourceFileName: r.source_filename,
+      inputFormat: r.input_format,
+      outputFormat: r.output_format,
+      outputPath: r.output_path || undefined,
+      status: r.status,
+      progress: r.progress,
+      createdAt: r.created_at,
+      startedAt: r.started_at || undefined,
+      completedAt: r.completed_at || undefined,
+      durationMs: r.duration_ms || undefined,
+      errorCode: r.error_code || undefined,
+      errorMessage: r.error_message || undefined
+    }));
   });
 
   // --- Window Control ---

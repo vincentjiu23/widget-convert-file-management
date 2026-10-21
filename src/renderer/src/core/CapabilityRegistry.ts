@@ -33,6 +33,14 @@ export const CAPABILITY_SECTORS: Record<FileCategory, RadialSector[]> = {
       description: 'Uncompressed Windows Bitmap',
       category: 'image',
       accentColor: '#a855f7'
+    },
+    {
+      id: 'img-tiff',
+      label: 'TIFF',
+      format: 'tiff',
+      description: 'High-Fidelity Archival Raster',
+      category: 'image',
+      accentColor: '#10b981'
     }
   ],
   video: [

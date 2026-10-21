@@ -385,4 +385,33 @@ describe('Part A & C: Final Index Integrity and Watcher Recovery Suite', () => {
     // Because folder is now disabled in registry, handleWatcherError should abort retry immediately
     expect(watcherService.getWatcherStatus(testDir)).toBe('UNWATCHED');
   });
+
+  it('restarts watcher and reconciles when folder is re-enabled', async () => {
+    db.addApprovedFolder({
+      id: 'f-watch-reenable',
+      path: testDir,
+      name: 'Watch Re-enable Test',
+      enabled: false
+    });
+    registry.refreshCache();
+
+    // While disabled, watcher should not be active
+    expect(watcherService.getWatcherStatus(testDir)).toBe('UNWATCHED');
+
+    // Re-enable folder
+    registry.toggleFolder('f-watch-reenable', true);
+    expect(registry.isPathWithinApprovedFolder(testDir).isValid).toBe(true);
+
+    // Watcher starts when re-enabled
+    const watchRes = watcherService.watch(testDir, 'f-watch-reenable');
+    expect(watchRes.success).toBe(true);
+    expect(watcherService.getWatcherStatus(testDir)).toBe('ACTIVE');
+
+    // Reconcile index
+    const folder = db.getApprovedFolderById('f-watch-reenable')!;
+    const reconcileRes = await indexer.reconcileFolder(folder);
+    expect(reconcileRes.reconciled).toBe(true);
+    const updated = db.getApprovedFolderById('f-watch-reenable');
+    expect(updated?.scan_status).toBe('RECONCILED');
+  });
 });

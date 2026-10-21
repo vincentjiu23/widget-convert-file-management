@@ -9,6 +9,7 @@ export interface StateMachineContext {
   errorMessage: string | null;
   successMessage: string | null;
   activeJobId: string | null;
+  lastOutputPath: string | null;
 }
 
 export type StateMachineAction =
@@ -22,6 +23,7 @@ export type StateMachineAction =
   | { type: 'CANCEL_ESCAPE' }
   | { type: 'JOB_STARTED'; jobId: string }
   | { type: 'RECORD_CONVERSION_PREVIEW'; targetFormat: string; note: string }
+  | { type: 'JOB_COMPLETED'; outputPath: string; message?: string }
   | { type: 'JOB_FAILED'; error: string }
   | { type: 'RESET_IDLE' };
 
@@ -32,7 +34,8 @@ export const INITIAL_STATE_CONTEXT: StateMachineContext = {
   hoveredSectorIndex: -1,
   errorMessage: null,
   successMessage: null,
-  activeJobId: null
+  activeJobId: null,
+  lastOutputPath: null
 };
 
 export function radialStateReducer(
@@ -146,6 +149,15 @@ export function radialStateReducer(
         ...current,
         state: 'PREVIEW_RECORDED',
         successMessage: action.note,
+        activeJobId: null
+      };
+
+    case 'JOB_COMPLETED':
+      return {
+        ...current,
+        state: 'SUCCESS',
+        lastOutputPath: action.outputPath,
+        successMessage: action.message || `File converted successfully: ${action.outputPath}`,
         activeJobId: null
       };
 

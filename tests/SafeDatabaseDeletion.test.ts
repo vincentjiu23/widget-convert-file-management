@@ -140,4 +140,49 @@ describe('Part B: Safe Database Record Deletion Suite', () => {
 
     expect(remaining.length).toBe(3);
   });
+
+  it('deletes directory and files case-insensitively on Windows (COLLATE NOCASE)', () => {
+    const mixedCaseDir = 'C:\\ProjectFiles\\MixedCaseFolder';
+    const file1 = 'C:\\ProjectFiles\\MixedCaseFolder\\Doc.txt';
+    const file2 = 'C:\\ProjectFiles\\MixedCaseFolder\\Nested\\Data.bin';
+
+    db.upsertFileIndexBatch([
+      {
+        id: 'fil-case-1',
+        folder_id: 'f-test',
+        path: file1,
+        parent_path: mixedCaseDir,
+        name: 'Doc.txt',
+        extension: 'txt',
+        category: 'document',
+        size_bytes: 100,
+        mtime_ms: Date.now(),
+        ctime_ms: Date.now(),
+        indexed_at: Date.now(),
+        index_status: 'INDEXED'
+      },
+      {
+        id: 'fil-case-2',
+        folder_id: 'f-test',
+        path: file2,
+        parent_path: `${mixedCaseDir}\\Nested`,
+        name: 'Data.bin',
+        extension: 'bin',
+        category: 'other',
+        size_bytes: 200,
+        mtime_ms: Date.now(),
+        ctime_ms: Date.now(),
+        indexed_at: Date.now(),
+        index_status: 'INDEXED'
+      }
+    ]);
+
+    expect(db.getTotalFileCount('f-test')).toBe(2);
+
+    // Call remove with all-lowercase path
+    db.removeFileIndexOrDirectory('c:\\projectfiles\\mixedcasefolder');
+
+    const remaining = db.getFileIndexEntries('f-test');
+    expect(remaining.length).toBe(0);
+  });
 });

@@ -22,7 +22,7 @@ export default defineConfig(({ mode }) => {
                   build: {
                     outDir: 'dist-electron/main',
                     rollupOptions: {
-                      external: ['electron', 'sql.js']
+                      external: ['electron', 'sql.js', 'sharp']
                     }
                   }
                 }

@@ -7,6 +7,7 @@ import { setupIpcHandlers } from './ipc';
 import { DatabaseService } from './database/DatabaseService';
 import { FolderPermissionRegistry } from './security/FolderPermissionRegistry';
 import { FileIndexer } from './indexer/FileIndexer';
+import { ImageConverter } from './converter/ImageConverter';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -16,6 +17,7 @@ let databaseService: DatabaseService | null = null;
 let permissionRegistry: FolderPermissionRegistry | null = null;
 let watcherService: DirectoryWatcherService | null = null;
 let fileIndexer: FileIndexer | null = null;
+let imageConverter: ImageConverter | null = null;
 
 // Enforce single instance lock
 const gotTheLock = app.requestSingleInstanceLock();
@@ -46,6 +48,9 @@ if (!gotTheLock) {
       }
     });
 
+    // Initialize Image Conversion Engine
+    imageConverter = new ImageConverter(databaseService);
+
     // Initialize Native Windows Watcher
     watcherService = new DirectoryWatcherService(
       () => mainWindow,
@@ -59,7 +64,8 @@ if (!gotTheLock) {
       permissionRegistry,
       watcherService,
       fileIndexer,
-      databaseService
+      databaseService,
+      imageConverter
     );
 
     // Automatically restore active watchers for enabled approved folders and reconcile offline changes

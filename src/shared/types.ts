@@ -101,6 +101,28 @@ export interface IndexStats {
   activeWatchersCount: number;
 }
 
+export interface ImageConversionResult {
+  success: boolean;
+  jobId: string;
+  sourcePath: string;
+  outputPath?: string;
+  sourceSizeBytes: number;
+  outputSizeBytes?: number;
+  inputFormat: string;
+  outputFormat: string;
+  durationMs: number;
+  error?: string;
+}
+
+export interface ImageMetadata {
+  width: number;
+  height: number;
+  format: string;
+  sizeBytes: number;
+  hasAlpha: boolean;
+  orientation?: number;
+}
+
 export interface RadialAPI {
   getPathForFile: (file: File) => string;
   openFolderPicker: () => Promise<string | null>;
@@ -114,6 +136,9 @@ export interface RadialAPI {
   queryIndex: (folderId?: string, limit?: number, offset?: number, query?: string) => Promise<FileIndexItem[]>;
   getIndexStats: () => Promise<IndexStats>;
   getActivityLogs: (limit?: number) => Promise<ActivityLogItem[]>;
+  convertImage: (sourcePath: string, targetFormat: string, options?: { quality?: number; backgroundColor?: string; outputDirectory?: string }) => Promise<ImageConversionResult>;
+  getImageMetadata: (sourcePath: string) => Promise<ImageMetadata>;
+  getConversionJobs: (limit?: number) => Promise<ConversionJob[]>;
   setIgnoreMouseEvents: (ignore: boolean, forward?: boolean) => void;
   minimizeWidget: () => void;
   closeWidget: () => void;

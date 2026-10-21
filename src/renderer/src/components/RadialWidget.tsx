@@ -31,7 +31,10 @@ import {
   X,
   UploadCloud,
   FileQuestion,
-  Layers
+  Layers,
+  CheckCircle,
+  Loader2,
+  Eye
 } from 'lucide-react';
 
 interface RadialWidgetProps {
@@ -342,7 +345,65 @@ export const RadialWidget: React.FC<RadialWidgetProps> = ({
         }`}
         onClick={() => fileInputRef.current?.click()}
       >
-        {context.state === 'PREVIEW_RECORDED' ? (
+        {context.state === 'PROCESSING' ? (
+          <div style={{ padding: '0 8px' }}>
+            <Loader2 size={36} color="#ff7e5f" className="animate-spin" style={{ marginBottom: 4 }} />
+            <div style={{ fontSize: '11px', fontWeight: '800', color: '#ff7e5f' }}>
+              CONVERTING...
+            </div>
+            <div style={{ fontSize: '9px', color: '#64748b', marginTop: 2, lineHeight: 1.2 }}>
+              Processing image with Sharp engine
+            </div>
+          </div>
+        ) : context.state === 'SUCCESS' ? (
+          <div style={{ padding: '0 8px' }}>
+            <CheckCircle size={36} color="#10b981" style={{ marginBottom: 4 }} />
+            <div style={{ fontSize: '11px', fontWeight: '800', color: '#10b981' }}>
+              CONVERTED!
+            </div>
+            <div
+              style={{
+                fontSize: '9px',
+                color: '#64748b',
+                marginTop: 2,
+                lineHeight: 1.2,
+                maxWidth: '120px',
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                whiteSpace: 'nowrap'
+              }}
+              title={context.lastOutputPath || ''}
+            >
+              {context.lastOutputPath?.split(/[/\\]/).pop() || 'File saved'}
+            </div>
+            <div style={{ display: 'flex', gap: 4, justifyContent: 'center', marginTop: 6 }}>
+              {context.lastOutputPath && window.radialAPI && (
+                <button
+                  className="btn-glass"
+                  style={{ fontSize: '10px', padding: '3px 8px', display: 'flex', alignItems: 'center', gap: 4 }}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    window.radialAPI?.showItemInFolder(context.lastOutputPath!);
+                  }}
+                  title="Reveal in Windows Explorer"
+                >
+                  <Eye size={12} />
+                  <span>Show</span>
+                </button>
+              )}
+              <button
+                className="btn-glass"
+                style={{ fontSize: '10px', padding: '3px 8px' }}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  dispatch({ type: 'RESET_IDLE' });
+                }}
+              >
+                Done
+              </button>
+            </div>
+          </div>
+        ) : context.state === 'PREVIEW_RECORDED' ? (
           <div style={{ padding: '0 8px' }}>
             <Layers size={36} color="#8b5cf6" style={{ marginBottom: 4 }} />
             <div style={{ fontSize: '11px', fontWeight: '800', color: '#8b5cf6' }}>

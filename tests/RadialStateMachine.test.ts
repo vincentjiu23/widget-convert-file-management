@@ -144,4 +144,26 @@ describe('RadialStateMachine Transition Suite', () => {
     expect(s.state).not.toBe('SUCCESS');
     expect(s.activeJobId).toBeNull();
   });
+
+  it('transitions to SUCCESS on real JOB_COMPLETED', () => {
+    let s = radialStateReducer(INITIAL_STATE_CONTEXT, {
+      type: 'DRAG_ENTER',
+      file: dummyImageFile
+    });
+    s = radialStateReducer(s, { type: 'TYPE_DETECTED', category: 'image' });
+    s = radialStateReducer(s, { type: 'DROP_ON_SECTOR', sector: dummySector });
+    s = radialStateReducer(s, { type: 'JOB_STARTED', jobId: 'job-real-1' });
+    expect(s.state).toBe('PROCESSING');
+
+    // Real conversion engine completes
+    s = radialStateReducer(s, {
+      type: 'JOB_COMPLETED',
+      outputPath: 'C:\\Users\\User\\Pictures\\photo.png',
+      message: 'Conversion completed: photo.png'
+    });
+
+    expect(s.state).toBe('SUCCESS');
+    expect(s.successMessage).toBe('Conversion completed: photo.png');
+    expect(s.activeJobId).toBeNull();
+  });
 });
