@@ -49,3 +49,30 @@ This document records architectural and product decisions made during the develo
 - **Context:** Handling existing files with identical names in the destination directory.
 - **Decision:** Never overwrite source files or existing output silently. The default policy creates a uniquely suffixed filename (e.g., `document (1).pdf`) and validates output existence and file size before marking a job as `SUCCEEDED`.
 - **Consequences:** Eliminates accidental data loss.
+
+---
+
+## ADR-006: External Explorer Drag with Empty MIME Fallback
+- **Status:** Decided (Stabilization Spike)
+- **Date:** 2026-10-22
+- **Context:** During external dragover from Windows File Explorer, Chromium does not disclose file contents or reliable MIME types (`item.type === ''`) to protect local system security until the file is dropped.
+- **Decision:** When an external file drag is detected (`Files` data transfer type) but MIME/extension is empty, the widget reveals a **Universal Quick-Conversion Ring** containing the primary targets (`PNG`, `JPEG`, `MP4`, `PDF`, `DOCX`, `TXT`). When the user drops the file onto a sector, the exact file path and extension are resolved via `webUtils.getPathForFile` and validated against cross-category rules before job queueing.
+- **Consequences:** The radial ring reliably appears during Windows Explorer drag without failing or freezing, and drops are strictly validated against incompatible target formats.
+
+---
+
+## ADR-007: Authoritative IPC Security & Directory Scope Enforcement
+- **Status:** Decided (Stabilization Spike)
+- **Date:** 2026-10-22
+- **Context:** The frontend renderer cannot be trusted as the sole validator for filesystem operations, watchers, or path access.
+- **Decision:** The Electron Main Process serves as the strict single source of truth (`FolderPermissionRegistry`). All paths are canonicalized (`path.resolve`), Windows drive roots (`C:\`) and protected system paths (`C:\Windows`, `C:\Program Files`) are forbidden, and path traversal (`..` escapes) are blocked. Any watcher or file operation outside approved folders returns `PERMISSION_DENIED`.
+- **Consequences:** Hardens local desktop security and prevents malicious renderer exploits.
+
+---
+
+## ADR-008: Persistent Local Indexing via SQLite (sql.js WASM)
+- **Status:** Decided (Stabilization Spike)
+- **Date:** 2026-10-22
+- **Context:** The application requires persistent local metadata indexing, schema migrations, and fast search without requiring MSVC C++ compilation tools on the host.
+- **Decision:** Use official SQLite WebAssembly (`sql.js`) with disk persistence (`radial_studio.sqlite`). Provides schema migrations (`schema_migrations`), indexed querying, initial scans, incremental event indexing, and periodic reconciliation sweeps.
+- **Consequences:** Full SQL querying and durability without native binary compilation dependencies.

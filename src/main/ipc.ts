@@ -1,18 +1,102 @@
 import { ipcMain, dialog, shell, BrowserWindow } from 'electron';
+import { FolderPermissionRegistry } from './security/FolderPermissionRegistry';
 import { DirectoryWatcherService } from './watcher';
+import { FileIndexer } from './indexer/FileIndexer';
+import { DatabaseService } from './database/DatabaseService';
 
 export function setupIpcHandlers(
   getMainWindow: () => BrowserWindow | null,
-  watcherService: DirectoryWatcherService
+  permissionRegistry: FolderPermissionRegistry,
+  watcherService: DirectoryWatcherService,
+  fileIndexer: FileIndexer,
+  databaseService: DatabaseService
 ): void {
-  // Safe directory picker using native Windows dialog
+  // --- Folder Management & Security ---
+
+  ipcMain.handle('folders:getApproved', async () => {
+    return permissionRegistry.getApprovedFolders();
+  });
+
+  ipcMain.handle('folders:add', async (_event, rawPath: string, name?: string) => {
+    if (typeof rawPath !== 'string') {
+      return { success: false, error: 'BAD_REQUEST: Path must be a string' };
+    }
+
+    const result = permissionRegistry.addFolder(rawPath, name);
+    if (result.success && result.folder) {
+      // Start watcher and trigger initial scan
+      watcherService.watch(result.folder.path, result.folder.id);
+      fileIndexer.initialScan(result.folder).catch((err) => {
+        console.error('[IPC] Initial scan error:', err);
+      });
+    }
+    return result;
+  });
+
+  ipcMain.handle('folders:remove', async (_event, folderId: string) => {
+    if (typeof folderId !== 'string') return false;
+    const folders = permissionRegistry.getApprovedFolders();
+    const folder = folders.find((f) => f.id === folderId);
+    if (folder) {
+      watcherService.unwatch(folder.path);
+    }
+    return permissionRegistry.removeFolder(folderId);
+  });
+
+  ipcMain.handle('folders:toggle', async (_event, folderId: string, enabled: boolean) => {
+    if (typeof folderId !== 'string' || typeof enabled !== 'boolean') return false;
+    const folders = permissionRegistry.getApprovedFolders();
+    const folder = folders.find((f) => f.id === folderId);
+    if (!folder) return false;
+
+    permissionRegistry.toggleFolder(folderId, enabled);
+    if (enabled) {
+      watcherService.watch(folder.path, folder.id);
+    } else {
+      watcherService.unwatch(folder.path);
+    }
+    return true;
+  });
+
+  ipcMain.handle('folders:rescan', async (_event, folderId: string) => {
+    if (typeof folderId !== 'string') return { success: false, error: 'BAD_REQUEST' };
+    const folders = permissionRegistry.getApprovedFolders();
+    const folder = folders.find((f) => f.id === folderId);
+    if (!folder) return { success: false, error: 'FOLDER_NOT_FOUND' };
+
+    const res = await fileIndexer.reconcileFolder(folder);
+    return { success: res.reconciled, fileCount: res.updatedCount };
+  });
+
+  // --- File Index Queries ---
+
+  ipcMain.handle('index:query', async (_event, folderId?: string, limit = 100, offset = 0, query = '') => {
+    return databaseService.getFileIndexEntries(folderId, limit, offset, query);
+  });
+
+  ipcMain.handle('index:stats', async () => {
+    const totalFiles = databaseService.getTotalFileCount();
+    const folders = permissionRegistry.getApprovedFolders();
+    return {
+      totalFiles,
+      approvedFolderCount: folders.length,
+      activeWatchersCount: folders.filter((f) => f.enabled).length
+    };
+  });
+
+  ipcMain.handle('activity:getLogs', async (_event, limit = 50) => {
+    return databaseService.getActivityLogs(limit);
+  });
+
+  // --- Native Windows Dialogs ---
+
   ipcMain.handle('dialog:openDirectory', async () => {
     const win = getMainWindow();
     if (!win) return null;
 
     const result = await dialog.showOpenDialog(win, {
       properties: ['openDirectory', 'dontAddToRecent'],
-      title: 'Select Folder to Monitor and Index'
+      title: 'Select Folder to Approve and Index'
     });
 
     if (result.canceled || result.filePaths.length === 0) {
@@ -22,29 +106,37 @@ export function setupIpcHandlers(
     return result.filePaths[0];
   });
 
-  // Safe file open / reveal
+  // --- Safe File Operations with Path Containment Validation ---
+
   ipcMain.handle('shell:openPath', async (_event, targetPath: string) => {
     if (!targetPath || typeof targetPath !== 'string') return false;
-    const res = await shell.openPath(targetPath);
-    return res === ''; // empty string means success in Electron shell.openPath
+
+    // Validate path containment
+    const validation = permissionRegistry.isPathWithinApprovedFolder(targetPath);
+    if (!validation.isValid) {
+      console.warn(`[Security Alert] Blocked attempt to open file outside approved scope: ${targetPath}`);
+      return false;
+    }
+
+    const res = await shell.openPath(validation.canonicalPath);
+    return res === '';
   });
 
   ipcMain.handle('shell:showItemInFolder', async (_event, targetPath: string) => {
     if (!targetPath || typeof targetPath !== 'string') return false;
-    shell.showItemInFolder(targetPath);
+
+    const validation = permissionRegistry.isPathWithinApprovedFolder(targetPath);
+    if (!validation.isValid) {
+      console.warn(`[Security Alert] Blocked attempt to reveal file outside approved scope: ${targetPath}`);
+      return false;
+    }
+
+    shell.showItemInFolder(validation.canonicalPath);
     return true;
   });
 
-  // Watcher registration
-  ipcMain.handle('watcher:start', async (_event, dirPath: string) => {
-    return watcherService.watch(dirPath);
-  });
+  // --- Window Control ---
 
-  ipcMain.handle('watcher:stop', async (_event, dirPath: string) => {
-    return watcherService.unwatch(dirPath);
-  });
-
-  // Window control
   ipcMain.on('window:setIgnoreMouseEvents', (_event, ignore: boolean, forward?: boolean) => {
     const win = getMainWindow();
     if (win && !win.isDestroyed()) {

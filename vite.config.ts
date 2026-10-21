@@ -4,42 +4,53 @@ import electron from 'vite-plugin-electron';
 import renderer from 'vite-plugin-electron-renderer';
 import path from 'path';
 
-export default defineConfig({
-  plugins: [
-    react(),
-    electron([
-      {
-        entry: 'src/main/index.ts',
-        vite: {
-          build: {
-            outDir: 'dist-electron/main',
-            rollupOptions: {
-              external: ['electron']
-            }
-          }
-        }
-      },
-      {
-        entry: 'src/preload/index.ts',
-        onstart(options) {
-          options.reload();
-        },
-        vite: {
-          build: {
-            outDir: 'dist-electron/preload'
-          }
-        }
+export default defineConfig(({ mode }) => {
+  const isTest = process.env.VITEST || mode === 'test';
+
+  return {
+    plugins: [
+      react(),
+      ...(!isTest
+        ? [
+            electron([
+              {
+                entry: 'src/main/index.ts',
+                onstart(options) {
+                  options.startup();
+                },
+                vite: {
+                  build: {
+                    outDir: 'dist-electron/main',
+                    rollupOptions: {
+                      external: ['electron', 'sql.js']
+                    }
+                  }
+                }
+              },
+              {
+                entry: 'src/preload/index.ts',
+                onstart(options) {
+                  options.reload();
+                },
+                vite: {
+                  build: {
+                    outDir: 'dist-electron/preload'
+                  }
+                }
+              }
+            ]),
+            renderer()
+          ]
+        : [])
+    ],
+    resolve: {
+      alias: {
+        '@': path.resolve(__dirname, 'src')
       }
-    ]),
-    renderer()
-  ],
-  resolve: {
-    alias: {
-      '@': path.resolve(__dirname, 'src')
+    },
+    test: {
+      globals: true,
+      environment: 'node'
     }
-  },
-  test: {
-    globals: true,
-    environment: 'node'
-  }
+  };
 });

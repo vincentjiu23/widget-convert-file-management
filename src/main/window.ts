@@ -1,5 +1,6 @@
 import { BrowserWindow, screen } from 'electron';
 import path from 'path';
+import fs from 'fs';
 import { fileURLToPath } from 'url';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -10,9 +11,17 @@ export function createFloatingWidgetWindow(): BrowserWindow {
   const { width: screenWidth, height: screenHeight } = primaryDisplay.workAreaSize;
 
   const windowSize = 820;
-  // Center window on primary monitor
   const x = Math.round((screenWidth - windowSize) / 2);
   const y = Math.round((screenHeight - windowSize) / 2);
+
+  // Preload path resolution: support both .js and .mjs build outputs
+  let preloadPath = path.join(__dirname, '../preload/index.js');
+  if (!fs.existsSync(preloadPath)) {
+    const mjsPath = path.join(__dirname, '../preload/index.mjs');
+    if (fs.existsSync(mjsPath)) {
+      preloadPath = mjsPath;
+    }
+  }
 
   const win = new BrowserWindow({
     width: windowSize,
@@ -28,7 +37,7 @@ export function createFloatingWidgetWindow(): BrowserWindow {
     skipTaskbar: false,
     backgroundColor: '#00000000',
     webPreferences: {
-      preload: path.join(__dirname, '../preload/index.mjs'),
+      preload: preloadPath,
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: false

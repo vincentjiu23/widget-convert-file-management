@@ -1,5 +1,12 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron';
-import { RadialAPI } from '../shared/types';
+import {
+  RadialAPI,
+  ApprovedFolder,
+  FileIndexItem,
+  IndexStats,
+  ActivityLogItem,
+  ScanProgress
+} from '../shared/types';
 
 const radialAPI: RadialAPI = {
   getPathForFile: (file: File): string => {
@@ -22,12 +29,36 @@ const radialAPI: RadialAPI = {
     return ipcRenderer.invoke('shell:showItemInFolder', targetPath);
   },
 
-  watchDirectory: async (dirPath: string): Promise<boolean> => {
-    return ipcRenderer.invoke('watcher:start', dirPath);
+  getApprovedFolders: async (): Promise<ApprovedFolder[]> => {
+    return ipcRenderer.invoke('folders:getApproved');
   },
 
-  unwatchDirectory: async (dirPath: string): Promise<boolean> => {
-    return ipcRenderer.invoke('watcher:stop', dirPath);
+  addApprovedFolder: async (folderPath: string, name?: string) => {
+    return ipcRenderer.invoke('folders:add', folderPath, name);
+  },
+
+  removeApprovedFolder: async (folderId: string): Promise<boolean> => {
+    return ipcRenderer.invoke('folders:remove', folderId);
+  },
+
+  toggleApprovedFolder: async (folderId: string, enabled: boolean): Promise<boolean> => {
+    return ipcRenderer.invoke('folders:toggle', folderId, enabled);
+  },
+
+  rescanApprovedFolder: async (folderId: string) => {
+    return ipcRenderer.invoke('folders:rescan', folderId);
+  },
+
+  queryIndex: async (folderId?: string, limit = 100, offset = 0, query = ''): Promise<FileIndexItem[]> => {
+    return ipcRenderer.invoke('index:query', folderId, limit, offset, query);
+  },
+
+  getIndexStats: async (): Promise<IndexStats> => {
+    return ipcRenderer.invoke('index:stats');
+  },
+
+  getActivityLogs: async (limit = 50): Promise<ActivityLogItem[]> => {
+    return ipcRenderer.invoke('activity:getLogs', limit);
   },
 
   setIgnoreMouseEvents: (ignore: boolean, forward?: boolean): void => {
@@ -42,13 +73,26 @@ const radialAPI: RadialAPI = {
     ipcRenderer.send('window:close');
   },
 
-  onDirectoryChanged: (callback: (event: { eventType: string; filename: string }) => void) => {
-    const subscription = (_event: Electron.IpcRendererEvent, data: { eventType: string; filename: string }) => {
+  onDirectoryChanged: (callback: (event: { folderId: string; dirPath: string; eventType: string; filename: string; timestamp: number }) => void) => {
+    const subscription = (
+      _event: Electron.IpcRendererEvent,
+      data: { folderId: string; dirPath: string; eventType: string; filename: string; timestamp: number }
+    ) => {
       callback(data);
     };
     ipcRenderer.on('fs:directory-changed', subscription);
     return () => {
       ipcRenderer.removeListener('fs:directory-changed', subscription);
+    };
+  },
+
+  onIndexerProgress: (callback: (progress: ScanProgress) => void) => {
+    const subscription = (_event: Electron.IpcRendererEvent, data: ScanProgress) => {
+      callback(data);
+    };
+    ipcRenderer.on('indexer:progress', subscription);
+    return () => {
+      ipcRenderer.removeListener('indexer:progress', subscription);
     };
   }
 };

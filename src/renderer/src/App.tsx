@@ -1,4 +1,4 @@
-import React, { useReducer, useState, useEffect } from 'react';
+import React, { useReducer, useState, useEffect, useCallback } from 'react';
 import { RadialWidget } from './components/RadialWidget';
 import { DashboardModal } from './components/DashboardModal';
 import {
@@ -6,126 +6,108 @@ import {
   INITIAL_STATE_CONTEXT
 } from './core/RadialStateMachine';
 import {
-  SelectedFolder,
+  ApprovedFolder,
   ConversionJob,
-  RadialSector
+  RadialSector,
+  FileIndexItem,
+  ActivityLogItem,
+  ScanProgress
 } from '../../shared/types';
 
 export const App: React.FC = () => {
   const [context, dispatch] = useReducer(radialStateReducer, INITIAL_STATE_CONTEXT);
   const [isDashboardOpen, setIsDashboardOpen] = useState(false);
 
-  // Common Windows folders onboarding state (explicit user approval)
-  const [folders, setFolders] = useState<SelectedFolder[]>([
-    {
-      id: 'f-desktop',
-      path: 'C:\\Users\\User\\Desktop',
-      name: 'Desktop',
-      enabled: true,
-      addedAt: Date.now()
-    },
-    {
-      id: 'f-documents',
-      path: 'C:\\Users\\User\\Documents',
-      name: 'Documents',
-      enabled: true,
-      addedAt: Date.now()
-    },
-    {
-      id: 'f-downloads',
-      path: 'C:\\Users\\User\\Downloads',
-      name: 'Downloads',
-      enabled: false,
-      addedAt: Date.now()
-    },
-    {
-      id: 'f-pictures',
-      path: 'C:\\Users\\User\\Pictures',
-      name: 'Pictures',
-      enabled: false,
-      addedAt: Date.now()
-    },
-    {
-      id: 'f-videos',
-      path: 'C:\\Users\\User\\Videos',
-      name: 'Videos',
-      enabled: false,
-      addedAt: Date.now()
-    }
-  ]);
-
+  const [folders, setFolders] = useState<ApprovedFolder[]>([]);
+  const [indexedFiles, setIndexedFiles] = useState<FileIndexItem[]>([]);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [activityLogs, setActivityLogs] = useState<ActivityLogItem[]>([]);
+  const [scanProgress, setScanProgress] = useState<ScanProgress | null>(null);
+  const [totalIndexedCount, setTotalIndexedCount] = useState(0);
   const [jobs, setJobs] = useState<ConversionJob[]>([]);
-  const [watcherLogs, setWatcherLogs] = useState<
-    Array<{ dirPath: string; eventType: string; filename: string; timestamp: number }>
-  >([]);
 
-  // Subscribe to native directory change events if available
-  useEffect(() => {
+  // Load authoritative folders and stats from Main Process SQLite
+  const loadData = useCallback(async () => {
     if (window.radialAPI) {
-      const unsubscribe = window.radialAPI.onDirectoryChanged((event) => {
-        setWatcherLogs((prev) => [
-          ...prev,
-          {
-            dirPath: '',
-            eventType: event.eventType,
-            filename: event.filename,
-            timestamp: Date.now()
-          }
-        ]);
-      });
+      try {
+        const approved = await window.radialAPI.getApprovedFolders();
+        setFolders(approved);
 
-      return () => unsubscribe();
+        const stats = await window.radialAPI.getIndexStats();
+        setTotalIndexedCount(stats.totalFiles);
+
+        const logs = await window.radialAPI.getActivityLogs(50);
+        setActivityLogs(logs);
+
+        const files = await window.radialAPI.queryIndex(undefined, 100, 0, searchQuery);
+        setIndexedFiles(files);
+      } catch (err) {
+        console.error('[App] Failed to load data from backend:', err);
+      }
     }
-  }, []);
+  }, [searchQuery]);
 
-  // Sync folder watchers with native backend
+  useEffect(() => {
+    loadData();
+  }, [loadData]);
+
+  // Handle native indexer progress & watcher notifications
   useEffect(() => {
     if (window.radialAPI) {
-      folders.forEach((f) => {
-        if (f.enabled) {
-          window.radialAPI?.watchDirectory(f.path);
-        } else {
-          window.radialAPI?.unwatchDirectory(f.path);
+      const unsubProgress = window.radialAPI.onIndexerProgress((progress) => {
+        setScanProgress(progress);
+        if (progress.isComplete) {
+          setTimeout(() => {
+            setScanProgress(null);
+            loadData();
+          }, 1200);
         }
       });
-    }
-  }, [folders]);
 
-  const handleToggleFolder = (id: string) => {
-    setFolders((prev) =>
-      prev.map((f) => (f.id === id ? { ...f, enabled: !f.enabled } : f))
-    );
+      const unsubWatcher = window.radialAPI.onDirectoryChanged(() => {
+        // Filesystem event received: refresh index and logs
+        loadData();
+      });
+
+      return () => {
+        unsubProgress();
+        unsubWatcher();
+      };
+    }
+  }, [loadData]);
+
+  const handleToggleFolder = async (id: string, currentEnabled: boolean) => {
+    if (window.radialAPI) {
+      await window.radialAPI.toggleApprovedFolder(id, !currentEnabled);
+      loadData();
+    }
+  };
+
+  const handleRescanFolder = async (id: string) => {
+    if (window.radialAPI) {
+      await window.radialAPI.rescanApprovedFolder(id);
+      loadData();
+    }
+  };
+
+  const handleRemoveFolder = async (id: string) => {
+    if (window.radialAPI) {
+      await window.radialAPI.removeApprovedFolder(id);
+      loadData();
+    }
   };
 
   const handleAddCustomFolder = async () => {
     if (window.radialAPI) {
       const selectedPath = await window.radialAPI.openFolderPicker();
       if (selectedPath) {
-        const folderName = selectedPath.split(/[\\/]/).pop() || selectedPath;
-        setFolders((prev) => [
-          ...prev,
-          {
-            id: `f-${Date.now()}`,
-            path: selectedPath,
-            name: folderName,
-            enabled: true,
-            addedAt: Date.now()
-          }
-        ]);
-      }
-    } else {
-      // Browser fallback simulation
-      const mockPath = 'C:\\Users\\User\\Projects\\MyAssets';
-      setFolders((prev) => [
-        ...prev,
-        {
-          id: `f-${Date.now()}`,
-          path: mockPath,
-          name: 'MyAssets',
-          enabled: true,
-          addedAt: Date.now()
+        const result = await window.radialAPI.addApprovedFolder(selectedPath);
+        if (result.success) {
+          loadData();
+        } else {
+          alert(`Could not add folder: ${result.error}`);
         }
-      ]);
+      }
     }
   };
 
@@ -154,7 +136,7 @@ export const App: React.FC = () => {
     setJobs((prev) => [newJob, ...prev]);
     dispatch({ type: 'JOB_STARTED', jobId });
 
-    // Local conversion execution simulation (validating output before marking succeeded)
+    // Output validation lifecycle simulation
     setTimeout(() => {
       setJobs((prev) =>
         prev.map((j) =>
@@ -173,7 +155,7 @@ export const App: React.FC = () => {
         type: 'JOB_COMPLETED',
         outputPath
       });
-    }, 900);
+    }, 800);
   };
 
   return (
@@ -190,9 +172,16 @@ export const App: React.FC = () => {
         onClose={() => setIsDashboardOpen(false)}
         folders={folders}
         onToggleFolder={handleToggleFolder}
+        onRescanFolder={handleRescanFolder}
         onAddCustomFolder={handleAddCustomFolder}
+        onRemoveFolder={handleRemoveFolder}
         jobs={jobs}
-        watcherLogs={watcherLogs}
+        indexedFiles={indexedFiles}
+        searchQuery={searchQuery}
+        onSearchChange={setSearchQuery}
+        activityLogs={activityLogs}
+        scanProgress={scanProgress}
+        totalIndexedCount={totalIndexedCount}
       />
     </>
   );

@@ -3,6 +3,7 @@ import { ClassifiedFile, FileCategory } from '../../../shared/types';
 const IMAGE_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'webp', 'bmp', 'gif', 'svg', 'tif', 'tiff', 'heic', 'heif']);
 const VIDEO_EXTENSIONS = new Set(['mp4', 'webm', 'mov', 'mkv', 'avi', 'm4v', 'flv', 'wmv']);
 const DOCUMENT_EXTENSIONS = new Set(['pdf', 'docx', 'doc', 'txt', 'rtf', 'odt', 'xlsx', 'xls', 'csv', 'pptx', 'ppt']);
+const KNOWN_UNSUPPORTED_EXTENSIONS = new Set(['exe', 'msi', 'zip', 'rar', '7z', 'tar', 'gz', 'iso', 'dll', 'sys', 'bat', 'cmd', 'ps1', 'vbs']);
 
 export function extractExtension(filePathOrName: string): string {
   const clean = filePathOrName.split('?')[0].split('#')[0];
@@ -14,14 +15,32 @@ export function extractExtension(filePathOrName: string): string {
 export function detectFileCategory(extension: string, mimeType?: string): FileCategory {
   const ext = extension.toLowerCase().replace(/^\./, '');
 
-  if (IMAGE_EXTENSIONS.has(ext) || (mimeType && mimeType.startsWith('image/'))) {
-    return 'image';
+  // 1. Direct extension matches (Primary authority on Windows)
+  if (IMAGE_EXTENSIONS.has(ext)) return 'image';
+  if (VIDEO_EXTENSIONS.has(ext)) return 'video';
+  if (DOCUMENT_EXTENSIONS.has(ext)) return 'document';
+  if (KNOWN_UNSUPPORTED_EXTENSIONS.has(ext)) return 'unknown';
+
+  // 2. MIME type inspection
+  if (mimeType && mimeType.trim() !== '') {
+    const cleanMime = mimeType.toLowerCase();
+    if (cleanMime.startsWith('image/')) return 'image';
+    if (cleanMime.startsWith('video/')) return 'video';
+    if (
+      cleanMime.includes('pdf') ||
+      cleanMime.startsWith('text/') ||
+      cleanMime.includes('word') ||
+      cleanMime.includes('document') ||
+      cleanMime.includes('sheet') ||
+      cleanMime.includes('presentation')
+    ) {
+      return 'document';
+    }
   }
-  if (VIDEO_EXTENSIONS.has(ext) || (mimeType && mimeType.startsWith('video/'))) {
-    return 'video';
-  }
-  if (DOCUMENT_EXTENSIONS.has(ext) || (mimeType && (mimeType.includes('pdf') || mimeType.includes('text/') || mimeType.includes('word') || mimeType.includes('document')))) {
-    return 'document';
+
+  // 3. Fallback when neither extension nor MIME is available during dragover
+  if (!ext && (!mimeType || mimeType.trim() === '' || mimeType === 'application/octet-stream')) {
+    return 'generic_file';
   }
 
   return 'unknown';
@@ -30,6 +49,7 @@ export function detectFileCategory(extension: string, mimeType?: string): FileCa
 export function classifyFile(file: { name: string; path?: string; type?: string; size?: number }): ClassifiedFile {
   const extension = extractExtension(file.name);
   const category = detectFileCategory(extension, file.type);
+  const isMimePending = category === 'generic_file';
 
   return {
     name: file.name,
@@ -37,7 +57,8 @@ export function classifyFile(file: { name: string; path?: string; type?: string;
     extension,
     category,
     mimeType: file.type,
-    sizeBytes: file.size
+    sizeBytes: file.size,
+    isMimePending
   };
 }
 
@@ -70,7 +91,9 @@ export function classifyMultipleFiles(files: Array<{ name: string; path?: string
     }
   }
 
-  const isHomogeneous = classified.length > 0 && classified.every(f => f.category === classified[0].category && f.category !== 'unknown');
+  const isHomogeneous =
+    classified.length > 0 &&
+    classified.every((f) => f.category === classified[0].category && f.category !== 'unknown');
 
   return {
     totalFiles: classified.length,

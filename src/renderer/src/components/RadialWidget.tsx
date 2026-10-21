@@ -4,7 +4,8 @@ import {
   StateMachineAction
 } from '../core/RadialStateMachine';
 import {
-  getCompatibleSectors
+  getCompatibleSectors,
+  validateConversionCompatibility
 } from '../core/CapabilityRegistry';
 import {
   getRadialSectorHit,
@@ -12,7 +13,9 @@ import {
   generateArcSvgPath
 } from '../core/RadialGeometry';
 import {
-  classifyFile
+  classifyFile,
+  extractExtension,
+  detectFileCategory
 } from '../core/FileClassifier';
 import {
   FileCategory,
@@ -27,7 +30,8 @@ import {
   AlertTriangle,
   FolderOpen,
   X,
-  UploadCloud
+  UploadCloud,
+  FileCheck
 } from 'lucide-react';
 
 interface RadialWidgetProps {
@@ -78,7 +82,6 @@ export const RadialWidget: React.FC<RadialWidgetProps> = ({
             sector: sectors[prevIndex]
           });
         } else if (e.key === 'Enter' && context.selectedSector && context.activeFile) {
-          // Trigger drop action via keyboard
           const syntheticFile = new File(['mock'], context.activeFile.name, {
             type: context.activeFile.mimeType
           });
@@ -116,11 +119,7 @@ export const RadialWidget: React.FC<RadialWidgetProps> = ({
             sector: sectors[hit.sectorIndex]
           });
         }
-      } else if (hit.isInsideCenter) {
-        if (context.hoveredSectorIndex !== -1) {
-          dispatch({ type: 'SECTOR_LEAVE' });
-        }
-      } else if (hit.isOutside) {
+      } else if (hit.isInsideCenter || hit.isOutside) {
         if (context.hoveredSectorIndex !== -1) {
           dispatch({ type: 'SECTOR_LEAVE' });
         }
@@ -130,13 +129,24 @@ export const RadialWidget: React.FC<RadialWidgetProps> = ({
 
   const handleDragEnter = (e: React.DragEvent) => {
     e.preventDefault();
-    if (e.dataTransfer.items && e.dataTransfer.items.length > 0) {
-      const item = e.dataTransfer.items[0];
-      // Extract dummy filename or item type
+
+    // Check if dragging files from Windows Explorer
+    const isFileDrag =
+      e.dataTransfer.types.includes('Files') ||
+      (e.dataTransfer.items && Array.from(e.dataTransfer.items).some((item) => item.kind === 'file'));
+
+    if (isFileDrag) {
+      let mime = '';
+      if (e.dataTransfer.items && e.dataTransfer.items.length > 0) {
+        mime = e.dataTransfer.items[0].type || '';
+      }
+
+      // If mime is empty, classifyFile will classify as 'generic_file' and open the universal ring
       const classified = classifyFile({
-        name: 'dragged-item',
-        type: item.type
+        name: mime ? `dragged-file` : `Explorer File`,
+        type: mime
       });
+
       dispatch({ type: 'DRAG_ENTER', file: classified });
       dispatch({ type: 'TYPE_DETECTED', category: classified.category });
     }
@@ -157,24 +167,39 @@ export const RadialWidget: React.FC<RadialWidgetProps> = ({
     }
 
     const firstFile = files[0];
-    const classified = classifyFile({
+    const realExt = extractExtension(firstFile.name);
+    const realCategory = detectFileCategory(realExt, firstFile.type);
+
+    const actualClassified = classifyFile({
       name: firstFile.name,
       path: window.radialAPI?.getPathForFile(firstFile) || firstFile.name,
       type: firstFile.type,
       size: firstFile.size
     });
 
-    // Update active file
-    dispatch({ type: 'DRAG_ENTER', file: classified });
-    dispatch({ type: 'TYPE_DETECTED', category: classified.category });
+    const activeSectors = getCompatibleSectors(context.activeFile?.category || 'generic_file');
+    const hit = getRadialSectorHit(x, y, CENTER, CENTER, R_INNER, R_OUTER, activeSectors.length);
 
-    const compatibleSectors = getCompatibleSectors(classified.category);
-    const hit = getRadialSectorHit(x, y, CENTER, CENTER, R_INNER, R_OUTER, compatibleSectors.length);
+    if (hit.isInsideRing && hit.sectorIndex >= 0 && hit.sectorIndex < activeSectors.length) {
+      const targetSector = activeSectors[hit.sectorIndex];
 
-    if (hit.isInsideRing && hit.sectorIndex >= 0 && hit.sectorIndex < compatibleSectors.length) {
-      const targetSector = compatibleSectors[hit.sectorIndex];
-      dispatch({ type: 'DROP_ON_SECTOR', sector: targetSector });
-      onExecuteDrop(firstFile, targetSector);
+      // Validate compatibility with actual dropped file
+      const check = validateConversionCompatibility(realExt, targetSector.format, realCategory);
+
+      if (check.isSupported) {
+        dispatch({ type: 'DRAG_ENTER', file: actualClassified });
+        dispatch({ type: 'DROP_ON_SECTOR', sector: targetSector });
+        onExecuteDrop(firstFile, targetSector);
+      } else {
+        dispatch({
+          type: 'JOB_FAILED',
+          error: check.reason || `Cannot convert .${realExt.toUpperCase()} to .${targetSector.format.toUpperCase()}`
+        });
+      }
+    } else if (hit.isInsideCenter) {
+      // Dropped on center circle: file classified, expand exact category ring
+      dispatch({ type: 'DRAG_ENTER', file: actualClassified });
+      dispatch({ type: 'TYPE_DETECTED', category: actualClassified.category });
     } else {
       dispatch({ type: 'DROP_OUTSIDE' });
     }
@@ -194,7 +219,6 @@ export const RadialWidget: React.FC<RadialWidgetProps> = ({
     }
   };
 
-  // Helper icon for categories
   const renderCategoryIcon = () => {
     switch (activeCategory) {
       case 'image':
@@ -203,6 +227,8 @@ export const RadialWidget: React.FC<RadialWidgetProps> = ({
         return <Video size={32} color="#f97316" />;
       case 'document':
         return <FileText size={32} color="#3b82f6" />;
+      case 'generic_file':
+        return <FileCheck size={32} color="#ff7e5f" />;
       default:
         return <Sparkles size={32} color="#ff7e5f" />;
     }
@@ -232,13 +258,6 @@ export const RadialWidget: React.FC<RadialWidgetProps> = ({
         height={CANVAS_SIZE}
         viewBox={`0 0 ${CANVAS_SIZE} ${CANVAS_SIZE}`}
       >
-        <defs>
-          <radialGradient id="sectorHoverGrad" cx="50%" cy="50%" r="50%">
-            <stop offset="0%" stopColor="#ff7e5f" stopOpacity="0.25" />
-            <stop offset="100%" stopColor="#feb47b" stopOpacity="0.1" />
-          </radialGradient>
-        </defs>
-
         {isRingExpanded &&
           sectors.map((sector, index) => {
             const startAngle = index * sectorSpan;
@@ -336,14 +355,14 @@ export const RadialWidget: React.FC<RadialWidgetProps> = ({
             </button>
           </div>
         ) : context.state === 'ERROR' ? (
-          <div>
-            <AlertTriangle size={36} color="#ef4444" style={{ marginBottom: 6 }} />
-            <div style={{ fontSize: '11px', color: '#ef4444', fontWeight: '600' }}>
+          <div style={{ padding: '0 8px' }}>
+            <AlertTriangle size={32} color="#ef4444" style={{ marginBottom: 4 }} />
+            <div style={{ fontSize: '10px', color: '#ef4444', fontWeight: '600', lineHeight: 1.2 }}>
               {context.errorMessage || 'Unsupported'}
             </div>
             <button
               className="btn-glass"
-              style={{ marginTop: 8, fontSize: '11px', padding: '4px 10px' }}
+              style={{ marginTop: 6, fontSize: '10px', padding: '3px 8px' }}
               onClick={(e) => {
                 e.stopPropagation();
                 dispatch({ type: 'RESET_IDLE' });
@@ -355,7 +374,9 @@ export const RadialWidget: React.FC<RadialWidgetProps> = ({
         ) : (
           <div>
             {context.activeFile ? (
-              <div className="category-pill">{activeCategory}</div>
+              <div className="category-pill">
+                {context.activeFile.isMimePending ? 'FILE DETECTED' : activeCategory}
+              </div>
             ) : null}
 
             <div style={{ display: 'flex', justifyContent: 'center', marginBottom: 4 }}>
@@ -364,7 +385,7 @@ export const RadialWidget: React.FC<RadialWidgetProps> = ({
 
             {context.selectedSector ? (
               <div>
-                <div style={{ fontSize: '12px', color: '#64748b' }}>Target format</div>
+                <div style={{ fontSize: '11px', color: '#64748b' }}>Target format</div>
                 <div style={{ fontSize: '16px', fontWeight: '800', color: '#ff7e5f' }}>
                   .{context.selectedSector.format.toUpperCase()}
                 </div>
@@ -384,7 +405,9 @@ export const RadialWidget: React.FC<RadialWidgetProps> = ({
                 >
                   {context.activeFile.name}
                 </div>
-                <div style={{ fontSize: '10px', color: '#64748b' }}>Drop on a format ring</div>
+                <div style={{ fontSize: '10px', color: '#64748b' }}>
+                  {context.activeFile.isMimePending ? 'Drop on a format ring' : 'Release on target'}
+                </div>
               </div>
             ) : (
               <div>
@@ -414,21 +437,20 @@ export const RadialWidget: React.FC<RadialWidgetProps> = ({
       >
         <button className="btn-glass" onClick={onOpenDashboard}>
           <FolderOpen size={16} />
-          <span>Dashboard & Folders</span>
+          <span>Dashboard & Database</span>
         </button>
 
         <button
           className="btn-glass"
           onClick={() => {
-            // Demo file injection for quick review
-            const mock = classifyFile({ name: 'sample-photo.png', size: 102400 });
+            const mock = classifyFile({ name: 'sample-report.docx', size: 204800 });
             dispatch({ type: 'DRAG_ENTER', file: mock });
             dispatch({ type: 'TYPE_DETECTED', category: mock.category });
           }}
-          title="Inject mock image to test radial ring"
+          title="Inject mock document to test DOCX ring"
         >
           <UploadCloud size={16} />
-          <span>Demo Image</span>
+          <span>Demo DOCX</span>
         </button>
 
         {context.state !== 'IDLE' && (
