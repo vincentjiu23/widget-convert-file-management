@@ -158,7 +158,9 @@ export class FileIndexer {
                 console.warn(`[Indexer] Skipping symlink target pointing outside root: ${fullPath} -> ${real}`);
                 continue;
               }
-            } catch {
+            } catch (err: unknown) {
+              hadDirectoryErrors = true;
+              console.warn(`[Indexer] Failed to resolve realpath for directory ${fullPath}:`, err);
               continue;
             }
 

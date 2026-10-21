@@ -219,6 +219,104 @@ describe('Part A & C: Final Index Integrity and Watcher Recovery Suite', () => {
     }
   });
 
+  it('retains records when directory realpath() verification fails and reports PARTIAL_INDEXED', async () => {
+    const subDir = path.join(testDir, 'sub_protected');
+    fs.mkdirSync(subDir, { recursive: true });
+    const fInside = path.join(subDir, 'inside.txt');
+    const fRoot = path.join(testDir, 'root_file.txt');
+    fs.writeFileSync(fInside, 'inside content');
+    fs.writeFileSync(fRoot, 'root content');
+
+    const folderRec = {
+      id: 'f-realpath-err',
+      path: testDir,
+      name: 'Realpath Error Test',
+      enabled: true,
+      added_at: Date.now(),
+      last_scan_at: null,
+      scan_status: 'PENDING',
+      file_count: 0
+    };
+    db.addApprovedFolder(folderRec);
+    registry.refreshCache();
+
+    // Initial full scan: all files indexed successfully
+    const initialScan = await indexer.initialScan(folderRec);
+    expect(initialScan.success).toBe(true);
+    expect(initialScan.scanStatus).toBe('INDEXED');
+    expect(db.getTotalFileCount('f-realpath-err')).toBe(2);
+
+    // Now mock fs.promises.realpath to fail specifically when verifying sub_protected directory
+    const originalRealpath = fs.promises.realpath;
+    const realpathSpy = vi.spyOn(fs.promises, 'realpath').mockImplementation((async (dirPath: any, opts: any) => {
+      if (typeof dirPath === 'string' && dirPath.includes('sub_protected')) {
+        const err = new Error('EACCES: permission denied during realpath resolution') as any;
+        err.code = 'EACCES';
+        throw err;
+      }
+      return (originalRealpath as any)(dirPath, opts);
+    }) as any);
+
+    try {
+      const res = await indexer.initialScan(folderRec);
+      expect(res.success).toBe(false);
+      expect(res.isPartial).toBe(true);
+      expect(res.scanStatus).toBe('PARTIAL_INDEXED');
+
+      // Verify folder status in database is PARTIAL_INDEXED, NOT INDEXED
+      const updatedFolder = db.getApprovedFolderById('f-realpath-err');
+      expect(updatedFolder?.scan_status).toBe('PARTIAL_INDEXED');
+
+      // Verify that pre-existing files in the unverified directory are RETAINED, NOT purged!
+      const files = db.getFileIndexEntries('f-realpath-err');
+      const paths = files.map((f) => f.path);
+      expect(paths).toContain(fInside);
+      expect(paths).toContain(fRoot);
+      expect(files.length).toBe(2);
+    } finally {
+      realpathSpy.mockRestore();
+    }
+  });
+
+  it('does not follow symlink or junction pointing outside approved root', async () => {
+    const subDir = path.join(testDir, 'symlink_dir');
+    fs.mkdirSync(subDir, { recursive: true });
+    const fInside = path.join(subDir, 'sub_file.txt');
+    fs.writeFileSync(fInside, 'sub file');
+
+    const folderRec = {
+      id: 'f-symlink-out',
+      path: testDir,
+      name: 'Symlink Escape Test',
+      enabled: true,
+      added_at: Date.now(),
+      last_scan_at: null,
+      scan_status: 'PENDING',
+      file_count: 0
+    };
+    db.addApprovedFolder(folderRec);
+    registry.refreshCache();
+
+    // Mock realpath to return a path outside testDir for symlink_dir
+    const originalRealpath = fs.promises.realpath;
+    const realpathSpy = vi.spyOn(fs.promises, 'realpath').mockImplementation((async (dirPath: any, opts: any) => {
+      if (typeof dirPath === 'string' && dirPath.includes('symlink_dir')) {
+        return path.resolve('C:\\OutsideRoot\\EscapeTarget');
+      }
+      return (originalRealpath as any)(dirPath, opts);
+    }) as any);
+
+    try {
+      const res = await indexer.initialScan(folderRec);
+      // Out of root directory was skipped, files inside it were NOT indexed!
+      const files = db.getFileIndexEntries('f-symlink-out');
+      const paths = files.map((f) => f.path);
+      expect(paths).not.toContain(fInside);
+    } finally {
+      realpathSpy.mockRestore();
+    }
+  });
+
   // --- Part C: Watcher Recovery, Retries, and Disablement ---
 
   it('transitions watcher to RECOVERING and schedules exponential retry on error', async () => {
