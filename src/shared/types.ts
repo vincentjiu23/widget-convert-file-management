@@ -38,11 +38,12 @@ export interface ConversionJob {
   sourceFileName: string;
   inputFormat: string;
   outputFormat: string;
-  status: 'QUEUED' | 'RUNNING' | 'PREVIEW_RECORDED' | 'FAILED' | 'CANCELLED' | 'SUCCEEDED';
+  status: 'QUEUED' | 'RUNNING' | 'SUCCEEDED' | 'FAILED' | 'CANCELLED' | 'UNSUPPORTED' | 'PREVIEW_RECORDED';
   progress: number;
   createdAt: number;
   startedAt?: number;
   completedAt?: number;
+  durationMs?: number;
   outputPath?: string;
   errorCode?: string;
   errorMessage?: string;
@@ -114,6 +115,20 @@ export interface ImageConversionResult {
   error?: string;
 }
 
+export interface DocumentConversionResult {
+  success: boolean;
+  jobId: string;
+  sourcePath: string;
+  outputPath?: string;
+  sourceSizeBytes: number;
+  outputSizeBytes?: number;
+  pageCount?: number;
+  inputFormat: string;
+  outputFormat: string;
+  durationMs: number;
+  error?: string;
+}
+
 export interface ImageMetadata {
   width: number;
   height: number;
@@ -121,6 +136,13 @@ export interface ImageMetadata {
   sizeBytes: number;
   hasAlpha: boolean;
   orientation?: number;
+}
+
+export interface WidgetState {
+  visible: boolean;
+  x: number;
+  y: number;
+  alwaysOnTop: boolean;
 }
 
 export interface RadialAPI {
@@ -137,8 +159,17 @@ export interface RadialAPI {
   getIndexStats: () => Promise<IndexStats>;
   getActivityLogs: (limit?: number) => Promise<ActivityLogItem[]>;
   convertImage: (sourcePath: string, targetFormat: string, options?: { quality?: number; backgroundColor?: string; outputDirectory?: string }) => Promise<ImageConversionResult>;
+  convertDocument: (sourcePath: string, options?: { outputDirectory?: string; customFilename?: string }) => Promise<DocumentConversionResult>;
+  convertFile: (sourcePath: string, targetFormat: string, options?: { quality?: number; outputDirectory?: string }) => Promise<ImageConversionResult | DocumentConversionResult>;
   getImageMetadata: (sourcePath: string) => Promise<ImageMetadata>;
   getConversionJobs: (limit?: number) => Promise<ConversionJob[]>;
+  clearCompletedJobs: () => Promise<boolean>;
+  retryJob: (jobId: string) => Promise<{ success: boolean; error?: string }>;
+  cancelJob: (jobId: string) => Promise<{ success: boolean; error?: string }>;
+  openDashboardWindow: () => Promise<boolean>;
+  toggleDesktopWidget: (visible?: boolean) => Promise<boolean>;
+  getWidgetState: () => Promise<WidgetState>;
+  saveWidgetPosition: (x: number, y: number) => Promise<boolean>;
   setIgnoreMouseEvents: (ignore: boolean, forward?: boolean) => void;
   minimizeWidget: () => void;
   closeWidget: () => void;

@@ -5,7 +5,8 @@ import {
   FileIndexItem,
   IndexStats,
   ActivityLogItem,
-  ScanProgress
+  ScanProgress,
+  WidgetState
 } from '../shared/types';
 
 const radialAPI: RadialAPI = {
@@ -65,12 +66,48 @@ const radialAPI: RadialAPI = {
     return ipcRenderer.invoke('conversion:convertImage', sourcePath, targetFormat, options);
   },
 
+  convertDocument: async (sourcePath: string, options?: { outputDirectory?: string; customFilename?: string }) => {
+    return ipcRenderer.invoke('conversion:convertDocument', sourcePath, 'txt', options);
+  },
+
+  convertFile: async (sourcePath: string, targetFormat: string, options?: { quality?: number; outputDirectory?: string }) => {
+    return ipcRenderer.invoke('conversion:convertFile', sourcePath, targetFormat, options);
+  },
+
   getImageMetadata: async (sourcePath: string) => {
     return ipcRenderer.invoke('conversion:getImageMetadata', sourcePath);
   },
 
   getConversionJobs: async (limit = 50) => {
     return ipcRenderer.invoke('conversion:getJobs', limit);
+  },
+
+  clearCompletedJobs: async () => {
+    return ipcRenderer.invoke('conversion:clearCompleted');
+  },
+
+  retryJob: async (jobId: string) => {
+    return ipcRenderer.invoke('conversion:retryJob', jobId);
+  },
+
+  cancelJob: async (jobId: string) => {
+    return ipcRenderer.invoke('conversion:cancelJob', jobId);
+  },
+
+  openDashboardWindow: async () => {
+    return ipcRenderer.invoke('window:openDashboard');
+  },
+
+  toggleDesktopWidget: async (visible?: boolean) => {
+    return ipcRenderer.invoke('window:toggleWidget', visible);
+  },
+
+  getWidgetState: async (): Promise<WidgetState> => {
+    return ipcRenderer.invoke('window:getWidgetState');
+  },
+
+  saveWidgetPosition: async (x: number, y: number) => {
+    return ipcRenderer.invoke('widget:savePosition', { x, y });
   },
 
   setIgnoreMouseEvents: (ignore: boolean, forward?: boolean): void => {

@@ -87,7 +87,6 @@ export const CAPABILITY_SECTORS: Record<FileCategory, RadialSector[]> = {
       accentColor: '#10b981'
     }
   ],
-  // When file identity is pending/unknown, do NOT fake a format list. Show empty sectors.
   generic_file: [],
   unknown: []
 };
@@ -103,6 +102,10 @@ export function getCompatibleSectors(category: FileCategory): RadialSector[] {
   return CAPABILITY_SECTORS[category] || [];
 }
 
+/**
+ * Validates whether a target format is a recognized capability for the given category.
+ * When dropped onto a sector, backend conversion engine performs real execution or marks unsupported.
+ */
 export function validateConversionCompatibility(
   sourceExtension: string,
   targetFormat: string,

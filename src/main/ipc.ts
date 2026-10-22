@@ -1,45 +1,61 @@
 import fs from 'fs';
 import path from 'path';
-import { ipcMain, dialog, shell, BrowserWindow } from 'electron';
+import { ipcMain, dialog, shell, BrowserWindow, screen } from 'electron';
 import { FolderPermissionRegistry } from './security/FolderPermissionRegistry';
 import { DirectoryWatcherService } from './watcher';
 import { FileIndexer } from './indexer/FileIndexer';
 import { DatabaseService } from './database/DatabaseService';
 import { ImageConverter, ImageConversionOptions } from './converter/ImageConverter';
+import { DocumentConverter, DocumentConversionOptions } from './converter/DocumentConverter';
+import { ConversionJob } from '../shared/types';
 
 /**
- * Validate that an IPC event originates strictly from the app's trusted main window.
- * Rejects renderer frames from devtools, secondary windows, external protocols, or spoofed senders.
+ * Validate that an IPC event originates strictly from a trusted BrowserWindow.
+ * Rejects renderer frames from devtools, external protocols, or spoofed senders.
  */
 export function isTrustedIpcSender(
   event: Electron.IpcMainInvokeEvent | Electron.IpcMainEvent,
-  win: BrowserWindow | null
+  trustedWindowOrWindows: BrowserWindow | null | (BrowserWindow | null)[]
 ): boolean {
-  if (!win || win.isDestroyed()) return false;
-  try {
-    if (event.sender !== win.webContents) return false;
-    // If senderFrame is present, verify that it matches the main frame
-    if ((event as Electron.IpcMainInvokeEvent).senderFrame && win.webContents.mainFrame) {
-      if ((event as Electron.IpcMainInvokeEvent).senderFrame !== win.webContents.mainFrame) {
-        return false;
+  if (!trustedWindowOrWindows) return false;
+  const windows = Array.isArray(trustedWindowOrWindows) ? trustedWindowOrWindows : [trustedWindowOrWindows];
+  for (const win of windows) {
+    if (!win || win.isDestroyed()) continue;
+    try {
+      if (event.sender === win.webContents) {
+        if ((event as Electron.IpcMainInvokeEvent).senderFrame && win.webContents.mainFrame) {
+          if ((event as Electron.IpcMainInvokeEvent).senderFrame !== win.webContents.mainFrame) {
+            continue;
+          }
+        }
+        return true;
       }
+    } catch {
+      continue;
     }
-    return true;
-  } catch {
-    return false;
   }
+  return false;
+}
+
+export interface WindowControllers {
+  getDashboardWindow: () => BrowserWindow | null;
+  getWidgetWindow: () => BrowserWindow | null;
+  openDashboardWindow: () => BrowserWindow;
+  toggleWidgetWindow: (visible?: boolean) => boolean;
 }
 
 export function setupIpcHandlers(
-  getMainWindow: () => BrowserWindow | null,
+  windowControllers: WindowControllers,
   permissionRegistry: FolderPermissionRegistry,
   watcherService: DirectoryWatcherService,
   fileIndexer: FileIndexer,
   databaseService: DatabaseService,
-  imageConverter: ImageConverter
+  imageConverter: ImageConverter,
+  documentConverter: DocumentConverter
 ): void {
   function verifyIpcSender(event: Electron.IpcMainInvokeEvent | Electron.IpcMainEvent): boolean {
-    return isTrustedIpcSender(event, getMainWindow());
+    const wins = [windowControllers.getDashboardWindow(), windowControllers.getWidgetWindow()];
+    return isTrustedIpcSender(event, wins);
   }
 
   // --- Folder Management & Security ---
@@ -60,7 +76,6 @@ export function setupIpcHandlers(
 
     const result = permissionRegistry.addFolder(rawPath.trim(), folderName);
     if (result.success && result.folder) {
-      // Start watcher and trigger initial scan
       watcherService.watch(result.folder.path, result.folder.id);
       fileIndexer.initialScan(result.folder).catch((err) => {
         console.error('[IPC] Initial scan error:', err);
@@ -161,7 +176,7 @@ export function setupIpcHandlers(
 
   ipcMain.handle('dialog:openDirectory', async (event) => {
     if (!verifyIpcSender(event)) return null;
-    const win = getMainWindow();
+    const win = windowControllers.getDashboardWindow() || windowControllers.getWidgetWindow();
     if (!win) return null;
 
     const result = await dialog.showOpenDialog(win, {
@@ -182,7 +197,6 @@ export function setupIpcHandlers(
     if (!verifyIpcSender(event)) return false;
     if (!targetPath || typeof targetPath !== 'string') return false;
 
-    // Validate path containment against approved user folders
     const validation = permissionRegistry.isPathWithinApprovedFolder(targetPath);
     if (!validation.isValid) {
       console.warn(`[Security Alert] Blocked attempt to open file outside approved scope: ${targetPath}`);
@@ -207,7 +221,7 @@ export function setupIpcHandlers(
     return true;
   });
 
-  // --- Real Image Conversion Engine Handlers ---
+  // --- Conversion Engines (Image + Document + Unified Dispatcher) ---
 
   ipcMain.handle('conversion:convertImage', async (event, sourcePath: unknown, targetFormat: unknown, options?: unknown) => {
     if (!verifyIpcSender(event)) {
@@ -223,8 +237,6 @@ export function setupIpcHandlers(
     }
 
     const cleanSource = sourcePath.trim();
-
-    // Verify source path exists and validate canonical realpath
     let realSource: string;
     try {
       realSource = await fs.promises.realpath(cleanSource);
@@ -239,14 +251,12 @@ export function setupIpcHandlers(
       };
     }
 
-    // IPC boundary: source must be within an approved folder
     const sourceValidation = permissionRegistry.isPathWithinApprovedFolder(realSource);
     if (!sourceValidation.isValid) {
       console.warn(`[Security Alert] Blocked conversion of file outside approved scope: ${realSource}`);
       return { success: false, error: 'SECURITY_VIOLATION: Source file is not within approved folders.' };
     }
 
-    // Parse options safely without trusting renderer
     const safeOpts: ImageConversionOptions = {};
     if (options && typeof options === 'object') {
       const opt = options as Record<string, unknown>;
@@ -257,7 +267,6 @@ export function setupIpcHandlers(
         safeOpts.backgroundColor = opt.backgroundColor.trim();
       }
       if (typeof opt.outputDirectory === 'string' && opt.outputDirectory.trim()) {
-        // IPC boundary: validate output directory against approved folders
         const outDirValidation = permissionRegistry.isPathWithinApprovedFolder(opt.outputDirectory.trim());
         if (!outDirValidation.isValid) {
           console.warn(`[Security Alert] Blocked output to unapproved directory: ${opt.outputDirectory}`);
@@ -273,13 +282,175 @@ export function setupIpcHandlers(
     return imageConverter.convertImage(realSource, targetFormat.trim(), safeOpts);
   });
 
+  ipcMain.handle('conversion:convertDocument', async (event, sourcePath: unknown, targetFormat: unknown, options?: unknown) => {
+    if (!verifyIpcSender(event)) {
+      return { success: false, error: 'UNAUTHORIZED: Invalid IPC sender' };
+    }
+
+    if (typeof sourcePath !== 'string' || !sourcePath.trim()) {
+      return { success: false, error: 'BAD_REQUEST: sourcePath must be a non-empty string' };
+    }
+
+    if (typeof targetFormat !== 'string' || !targetFormat.trim()) {
+      return { success: false, error: 'BAD_REQUEST: targetFormat must be a non-empty string' };
+    }
+
+    const cleanSource = sourcePath.trim();
+    let realSource: string;
+    try {
+      realSource = await fs.promises.realpath(cleanSource);
+      const stat = await fs.promises.stat(realSource);
+      if (!stat.isFile()) {
+        return { success: false, error: 'BAD_REQUEST: Source path is not a file' };
+      }
+    } catch (err: unknown) {
+      return {
+        success: false,
+        error: `FILE_ACCESS_ERROR: Cannot access source file: ${err instanceof Error ? err.message : String(err)}`
+      };
+    }
+
+    const sourceValidation = permissionRegistry.isPathWithinApprovedFolder(realSource);
+    if (!sourceValidation.isValid) {
+      console.warn(`[Security Alert] Blocked document conversion outside approved scope: ${realSource}`);
+      return { success: false, error: 'SECURITY_VIOLATION: Source file is not within approved folders.' };
+    }
+
+    const safeOpts: DocumentConversionOptions = {};
+    if (options && typeof options === 'object') {
+      const opt = options as Record<string, unknown>;
+      if (typeof opt.outputDirectory === 'string' && opt.outputDirectory.trim()) {
+        const outDirValidation = permissionRegistry.isPathWithinApprovedFolder(opt.outputDirectory.trim());
+        if (!outDirValidation.isValid) {
+          return { success: false, error: 'SECURITY_VIOLATION: Output directory is not within approved folders.' };
+        }
+        safeOpts.outputDirectory = outDirValidation.canonicalPath;
+      }
+      if (typeof opt.customFilename === 'string' && opt.customFilename.trim()) {
+        safeOpts.customFilename = path.basename(opt.customFilename.trim());
+      }
+    }
+
+    return documentConverter.convertDocument(realSource, targetFormat.trim(), safeOpts);
+  });
+
+  // Generic Unified Converter: delegates cleanly by file type and records consistent state
+  ipcMain.handle('conversion:convertFile', async (event, sourcePath: unknown, targetFormat: unknown, options?: unknown) => {
+    if (!verifyIpcSender(event)) {
+      return { success: false, error: 'UNAUTHORIZED: Invalid IPC sender' };
+    }
+
+    if (typeof sourcePath !== 'string' || !sourcePath.trim()) {
+      return { success: false, error: 'BAD_REQUEST: sourcePath must be a non-empty string' };
+    }
+    if (typeof targetFormat !== 'string' || !targetFormat.trim()) {
+      return { success: false, error: 'BAD_REQUEST: targetFormat must be a non-empty string' };
+    }
+
+    const cleanSource = sourcePath.trim();
+    const cleanTarget = targetFormat.trim().toLowerCase().replace(/^\./, '');
+    const ext = path.extname(cleanSource).toLowerCase().replace(/^\./, '');
+
+    const imageExts = ['png', 'jpg', 'jpeg', 'webp', 'bmp', 'tiff', 'tif'];
+    const isImage = imageExts.includes(ext);
+    const isPdf = ext === 'pdf';
+
+    if (isImage) {
+      return imageConverter.convertImage(cleanSource, cleanTarget, options as ImageConversionOptions);
+    }
+
+    if (isPdf && cleanTarget === 'txt') {
+      return documentConverter.convertDocument(cleanSource, cleanTarget, options as DocumentConversionOptions);
+    }
+
+    // Unsupported conversion request: record honest database entry and return informative error
+    const jobId = `job-unsup-${Date.now()}`;
+    const filename = path.basename(cleanSource);
+    const reason = isPdf
+      ? `PDF target format .${cleanTarget.toUpperCase()} is not supported. Currently only PDF to TXT text extraction is available.`
+      : `Conversion from .${ext.toUpperCase()} to .${cleanTarget.toUpperCase()} is not yet implemented.`;
+
+    databaseService.insertConversionJob({
+      id: jobId,
+      source_path: cleanSource,
+      source_filename: filename,
+      input_format: ext,
+      output_format: cleanTarget,
+      output_path: null,
+      status: 'UNSUPPORTED',
+      progress: 0,
+      created_at: Date.now(),
+      completed_at: Date.now(),
+      error_code: 'UNSUPPORTED_CONVERSION',
+      error_message: reason
+    });
+
+    databaseService.logActivity({
+      event_type: 'CONVERSION_UNSUPPORTED',
+      resource_type: 'CONVERSION_JOB',
+      resource_id: jobId,
+      summary: `Conversion rejected: ${filename} (.${ext} -> .${cleanTarget}) is unsupported`,
+      details: { source: cleanSource, targetFormat: cleanTarget, reason }
+    });
+
+    return {
+      success: false,
+      jobId,
+      error: reason,
+      status: 'UNSUPPORTED'
+    };
+  });
+
+  ipcMain.handle('conversion:retryJob', async (event, jobId: unknown) => {
+    if (!verifyIpcSender(event)) return { success: false, error: 'UNAUTHORIZED' };
+    if (typeof jobId !== 'string' || !jobId.trim()) return { success: false, error: 'BAD_REQUEST' };
+
+    const job = databaseService.getConversionJobById(jobId.trim());
+    if (!job) return { success: false, error: 'JOB_NOT_FOUND' };
+
+    // Re-dispatch using convertFile logic
+    const ext = path.extname(job.source_path).toLowerCase().replace(/^\./, '');
+    const isImage = ['png', 'jpg', 'jpeg', 'webp', 'bmp', 'tiff', 'tif'].includes(ext);
+
+    if (isImage) {
+      return imageConverter.convertImage(job.source_path, job.output_format);
+    } else if (ext === 'pdf' && job.output_format.toLowerCase() === 'txt') {
+      return documentConverter.convertDocument(job.source_path, job.output_format);
+    }
+
+    return { success: false, error: `Conversion for .${ext} to .${job.output_format} is unsupported.` };
+  });
+
+  ipcMain.handle('conversion:cancelJob', async (event, jobId: unknown) => {
+    if (!verifyIpcSender(event)) return false;
+    if (typeof jobId !== 'string' || !jobId.trim()) return false;
+
+    const job = databaseService.getConversionJobById(jobId.trim());
+    if (!job) return false;
+
+    if (job.status === 'QUEUED' || job.status === 'RUNNING') {
+      databaseService.updateConversionJob(job.id, {
+        status: 'CANCELLED',
+        completed_at: Date.now(),
+        error_message: 'Job cancelled by user'
+      });
+      return true;
+    }
+    return false;
+  });
+
+  ipcMain.handle('conversion:clearCompleted', async (event) => {
+    if (!verifyIpcSender(event)) return false;
+    databaseService.clearCompletedJobs();
+    return true;
+  });
+
   ipcMain.handle('conversion:getImageMetadata', async (event, sourcePath: unknown) => {
     if (!verifyIpcSender(event)) throw new Error('UNAUTHORIZED: Invalid IPC sender');
     if (typeof sourcePath !== 'string' || !sourcePath.trim()) {
       throw new Error('BAD_REQUEST: sourcePath must be a non-empty string');
     }
 
-    // Validate source path against approved folders
     const cleanSource = sourcePath.trim();
     let realSource: string;
     try {
@@ -302,7 +473,7 @@ export function setupIpcHandlers(
       ? Math.min(Math.floor(limit), 200)
       : 50;
     const records = databaseService.getConversionJobs(safeLimit);
-    return records.map((r) => ({
+    return records.map((r): ConversionJob => ({
       id: r.id,
       sourcePath: r.source_path,
       sourceFileName: r.source_filename,
@@ -320,21 +491,71 @@ export function setupIpcHandlers(
     }));
   });
 
-  // --- Window Control ---
+  // --- Window Control & Dual-Mode Coordination ---
 
+  ipcMain.handle('window:openDashboard', async (event) => {
+    if (!verifyIpcSender(event)) return false;
+    const dash = windowControllers.openDashboardWindow();
+    if (dash) {
+      if (dash.isMinimized()) dash.restore();
+      dash.focus();
+      return true;
+    }
+    return false;
+  });
+
+  ipcMain.handle('window:toggleWidget', async (event, visible?: unknown) => {
+    if (!verifyIpcSender(event)) return false;
+    const isVis = typeof visible === 'boolean' ? visible : undefined;
+    return windowControllers.toggleWidgetWindow(isVis);
+  });
+
+  ipcMain.handle('window:getWidgetState', async (event) => {
+    if (!verifyIpcSender(event)) return null;
+    const widgetWin = windowControllers.getWidgetWindow();
+    const savedBounds = databaseService.getSetting<{ x: number; y: number; width: number; height: number } | null>(
+      'widget_position',
+      null
+    );
+    const alwaysOnTop = databaseService.getSetting<boolean>('widget_always_on_top', false);
+
+    return {
+      isVisible: widgetWin ? widgetWin.isVisible() : false,
+      isAlwaysOnTop: alwaysOnTop,
+      bounds: widgetWin && !widgetWin.isDestroyed() ? widgetWin.getBounds() : savedBounds
+    };
+  });
+
+  ipcMain.handle('widget:savePosition', async (event, bounds: unknown) => {
+    if (!verifyIpcSender(event)) return false;
+    if (!bounds || typeof bounds !== 'object') return false;
+    const b = bounds as Record<string, unknown>;
+    if (typeof b.x === 'number' && typeof b.y === 'number') {
+      databaseService.setSetting('widget_position', {
+        x: Math.round(b.x),
+        y: Math.round(b.y),
+        width: typeof b.width === 'number' ? Math.round(b.width) : 380,
+        height: typeof b.height === 'number' ? Math.round(b.height) : 380
+      });
+      return true;
+    }
+    return false;
+  });
+
+  // Mouse event pass-through control (for frameless widget)
   ipcMain.on('window:setIgnoreMouseEvents', (event, ignore: unknown, forward?: unknown) => {
     if (!verifyIpcSender(event)) return;
     if (typeof ignore !== 'boolean') return;
     const safeForward = typeof forward === 'boolean' ? forward : false;
-    const win = getMainWindow();
-    if (win && !win.isDestroyed()) {
-      win.setIgnoreMouseEvents(ignore, { forward: safeForward });
+    const widgetWin = windowControllers.getWidgetWindow();
+    if (widgetWin && !widgetWin.isDestroyed()) {
+      widgetWin.setIgnoreMouseEvents(ignore, { forward: safeForward });
     }
   });
 
   ipcMain.on('window:minimize', (event) => {
     if (!verifyIpcSender(event)) return;
-    const win = getMainWindow();
+    const win = BrowserWindow.fromWebContents(event.sender);
     if (win && !win.isDestroyed()) {
       win.minimize();
     }
@@ -342,7 +563,7 @@ export function setupIpcHandlers(
 
   ipcMain.on('window:close', (event) => {
     if (!verifyIpcSender(event)) return;
-    const win = getMainWindow();
+    const win = BrowserWindow.fromWebContents(event.sender);
     if (win && !win.isDestroyed()) {
       win.close();
     }

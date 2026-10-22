@@ -195,7 +195,8 @@ export class FolderPermissionRegistry {
     let lowerResolved: string | null = null;
     if (fs.existsSync(canonicalTarget)) {
       try {
-        resolvedTarget = this.canonicalize(fs.realpathSync(canonicalTarget));
+        const nativeRealpath = typeof fs.realpathSync.native === 'function' ? fs.realpathSync.native : fs.realpathSync;
+        resolvedTarget = this.canonicalize(nativeRealpath(canonicalTarget));
         lowerResolved = resolvedTarget.toLowerCase();
       } catch {
         // If realpathSync fails, fall through to canonical-only check
@@ -212,7 +213,8 @@ export class FolderPermissionRegistry {
       let lowerApprovedResolved: string | null = null;
       if (fs.existsSync(canonicalApproved)) {
         try {
-          lowerApprovedResolved = this.canonicalize(fs.realpathSync(canonicalApproved)).toLowerCase();
+          const nativeRealpath = typeof fs.realpathSync.native === 'function' ? fs.realpathSync.native : fs.realpathSync;
+          lowerApprovedResolved = this.canonicalize(nativeRealpath(canonicalApproved)).toLowerCase();
         } catch {
           // Fall through
         }

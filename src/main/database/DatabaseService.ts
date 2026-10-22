@@ -55,7 +55,7 @@ export interface ConversionJobRecord {
   input_format: string;
   output_format: string;
   output_path?: string | null;
-  status: 'QUEUED' | 'RUNNING' | 'SUCCEEDED' | 'FAILED' | 'CANCELLED';
+  status: 'QUEUED' | 'RUNNING' | 'SUCCEEDED' | 'FAILED' | 'CANCELLED' | 'UNSUPPORTED';
   progress: number;
   created_at: number;
   started_at?: number | null;
@@ -732,6 +732,47 @@ export class DatabaseService {
     }
     stmt.free();
     return null;
+  }
+
+  // --- App Settings ---
+
+  public getSetting<T>(key: string, defaultValue: T): T {
+    if (!this.db) return defaultValue;
+    try {
+      const stmt = this.db.prepare(`SELECT value_json FROM app_settings WHERE key = ?;`);
+      stmt.bind([key]);
+      if (stmt.step()) {
+        const val = stmt.get()[0] as string;
+        stmt.free();
+        return JSON.parse(val) as T;
+      }
+      stmt.free();
+    } catch (err) {
+      console.warn(`[Database] Error getting setting ${key}:`, err);
+    }
+    return defaultValue;
+  }
+
+  public setSetting(key: string, value: unknown): void {
+    if (!this.db) return;
+    try {
+      const stmt = this.db.prepare(`
+        INSERT INTO app_settings (key, value_json, updated_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at;
+      `);
+      stmt.run([key, JSON.stringify(value), Date.now()]);
+      stmt.free();
+      this.schedulePersist();
+    } catch (err) {
+      console.error(`[Database] Error saving setting ${key}:`, err);
+    }
+  }
+
+  public clearCompletedJobs(): void {
+    if (!this.db) return;
+    this.db.run(`DELETE FROM conversion_jobs WHERE status IN ('SUCCEEDED', 'FAILED', 'CANCELLED', 'UNSUPPORTED');`);
+    this.schedulePersist();
   }
 
   public close(): void {
