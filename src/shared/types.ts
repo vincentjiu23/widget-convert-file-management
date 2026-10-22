@@ -176,6 +176,15 @@ export interface RadialAPI {
   setIgnoreMouseEvents: (ignore: boolean, forward?: boolean) => void;
   minimizeWidget: () => void;
   closeWidget: () => void;
+  checkPathPermission: (targetPath: string) => Promise<{
+    exists: boolean;
+    isFile: boolean;
+    isApproved: boolean;
+    canonicalPath: string;
+    folderPath?: string;
+    folderName?: string;
+    error?: string;
+  }>;
   onDirectoryChanged: (callback: (event: { folderId: string; dirPath: string; eventType: string; filename: string; timestamp: number }) => void) => () => void;
   onIndexerProgress: (callback: (progress: ScanProgress) => void) => () => void;
 }

@@ -128,6 +128,54 @@ export function setupIpcHandlers(
     return { success: res.reconciled, fileCount: res.updatedCount };
   });
 
+  // --- Security & Path Verification ---
+
+  ipcMain.handle('security:checkPath', async (event, targetPath: unknown) => {
+    if (!verifyIpcSender(event)) {
+      return { exists: false, isFile: false, isApproved: false, canonicalPath: '', error: 'UNAUTHORIZED: Invalid IPC sender' };
+    }
+    if (typeof targetPath !== 'string' || !targetPath.trim()) {
+      return { exists: false, isFile: false, isApproved: false, canonicalPath: '', error: 'BAD_REQUEST: targetPath must be a non-empty string' };
+    }
+
+    const clean = targetPath.trim();
+    if (!path.isAbsolute(clean)) {
+      return { exists: false, isFile: false, isApproved: false, canonicalPath: '', error: 'BAD_REQUEST: targetPath must be an absolute path' };
+    }
+
+    try {
+      if (!fs.existsSync(clean)) {
+        return { exists: false, isFile: false, isApproved: false, canonicalPath: clean, error: 'FILE_NOT_FOUND' };
+      }
+      const real = await fs.promises.realpath(clean);
+      const stat = await fs.promises.stat(real);
+      if (!stat.isFile()) {
+        return { exists: true, isFile: false, isApproved: false, canonicalPath: real, error: 'NOT_A_FILE' };
+      }
+
+      const validation = permissionRegistry.isPathWithinApprovedFolder(real);
+      const dirPath = path.dirname(real);
+      const dirName = path.basename(dirPath) || dirPath;
+
+      return {
+        exists: true,
+        isFile: true,
+        isApproved: validation.isValid,
+        canonicalPath: real,
+        folderPath: dirPath,
+        folderName: dirName
+      };
+    } catch (err: unknown) {
+      return {
+        exists: false,
+        isFile: false,
+        isApproved: false,
+        canonicalPath: clean,
+        error: err instanceof Error ? err.message : String(err)
+      };
+    }
+  });
+
   // --- File Index Queries ---
 
   ipcMain.handle('index:query', async (event, folderId?: unknown, limit?: unknown, offset?: unknown, query?: unknown) => {

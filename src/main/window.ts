@@ -7,14 +7,22 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 export function getPreloadPath(): string {
-  let preloadPath = path.join(__dirname, '../preload/index.js');
-  if (!fs.existsSync(preloadPath)) {
-    const mjsPath = path.join(__dirname, '../preload/index.mjs');
-    if (fs.existsSync(mjsPath)) {
-      preloadPath = mjsPath;
+  const candidates = [
+    path.join(__dirname, '../preload/index.js'),
+    path.join(__dirname, '../preload/index.mjs'),
+    path.join(__dirname, '../../dist-electron/preload/index.js'),
+    path.join(process.cwd(), 'dist-electron/preload/index.js'),
+    path.join(__dirname, '../preload/index.ts'),
+    path.join(process.cwd(), 'src/preload/index.ts')
+  ];
+
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) {
+      return candidate;
     }
   }
-  return preloadPath;
+
+  return path.join(__dirname, '../preload/index.js');
 }
 
 /**

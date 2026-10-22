@@ -12,6 +12,7 @@ import {
 const radialAPI: RadialAPI = {
   getPathForFile: (file: File): string => {
     try {
+      if (!file) return '';
       if (webUtils && typeof webUtils.getPathForFile === 'function') {
         const resolved = webUtils.getPathForFile(file);
         if (resolved && typeof resolved === 'string' && resolved.trim()) {
@@ -22,9 +23,14 @@ const radialAPI: RadialAPI = {
         return (file as any).path.trim();
       }
       return '';
-    } catch {
+    } catch (err) {
+      console.warn('[Preload getPathForFile] Resolution error:', err);
       return '';
     }
+  },
+
+  checkPathPermission: async (targetPath: string) => {
+    return ipcRenderer.invoke('security:checkPath', targetPath);
   },
 
   openFolderPicker: async (): Promise<string | null> => {

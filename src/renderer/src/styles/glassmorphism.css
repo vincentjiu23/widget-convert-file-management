@@ -348,6 +348,7 @@ body, html {
   justify-content: center;
   background: transparent !important;
   overflow: hidden;
+  -webkit-app-region: no-drag;
 }
 
 /* Sleek Translucent Drag Handle Pill */
@@ -386,7 +387,7 @@ body, html {
 }
 
 .widget-no-drag {
-  -webkit-app-region: no-drag;
+  -webkit-app-region: no-drag !important;
 }
 
 /* Central Primary Circle (Frosted Transparent Acrylic Glass) */
@@ -411,6 +412,13 @@ body, html {
   padding: 14px;
   color: var(--text-main);
   text-shadow: var(--text-shadow-legible);
+  -webkit-app-region: no-drag !important;
+  pointer-events: auto;
+}
+
+/* Ensure children do not swallow drag events or interfere with the circle drop zone */
+.primary-circle * {
+  pointer-events: none;
 }
 
 .primary-circle:hover {

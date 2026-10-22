@@ -1,6 +1,6 @@
 import { app, BrowserWindow } from 'electron';
 import path from 'path';
-import { fileURLToPath } from 'url';
+import { fileURLToPath, pathToFileURL } from 'url';
 import { createDashboardWindow, createFloatingWidgetWindow } from './window';
 import { DirectoryWatcherService } from './watcher';
 import { setupIpcHandlers, WindowControllers } from './ipc';
@@ -46,7 +46,9 @@ if (!gotTheLock) {
       return url.toString();
     }
     const htmlPath = path.join(__dirname, '../../dist/index.html');
-    return `file://${htmlPath}?mode=${mode}`;
+    const fileUrl = pathToFileURL(htmlPath);
+    fileUrl.searchParams.set('mode', mode);
+    return fileUrl.toString();
   }
 
   function openDashboard(): BrowserWindow {
