@@ -125,20 +125,32 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
     setConversionMessage(null);
 
     try {
-      const filePath = window.radialAPI.getPathForFile(selectedFileForConvert) || selectedFileForConvert.name;
+      const filePath =
+        (selectedFileForConvert as unknown as { resolvedPath?: string }).resolvedPath ||
+        window.radialAPI.getPathForFile(selectedFileForConvert);
+
+      if (!filePath || (!filePath.includes('/') && !filePath.includes('\\'))) {
+        setConversionMessage({
+          type: 'error',
+          text: 'Cannot resolve valid filesystem path. Please click browse to select your file directly with the file dialog.'
+        });
+        setIsConverting(false);
+        return;
+      }
+
       const res = await window.radialAPI.convertFile(filePath, targetFormat);
 
       if (res.success && res.outputPath) {
         setConversionMessage({
           type: 'success',
-          text: `Success! Converted to ${targetFormat.toUpperCase()}: ${res.outputPath.split(/[/\\]/).pop()}`
+          text: `Success! Converted to .${targetFormat.toUpperCase()}: ${res.outputPath.split(/[/\\]/).pop()}`
         });
         setSelectedFileForConvert(null);
         onRefreshData();
       } else {
         setConversionMessage({
           type: 'error',
-          text: res.error || 'Conversion failed.'
+          text: res.error || (res.status === 'UNSUPPORTED' ? `Format .${targetFormat.toUpperCase()} is unsupported.` : 'Conversion failed.')
         });
         onRefreshData();
       }
@@ -363,8 +375,29 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               )}
 
               {!selectedFileForConvert ? (
-                <label
+                <div
                   className="drop-zone-card"
+                  onClick={async () => {
+                    if (window.radialAPI?.openFilePicker) {
+                      try {
+                        const picked = await window.radialAPI.openFilePicker();
+                        if (picked) {
+                          const fileName = picked.split(/[/\\]/).pop() || picked;
+                          const dummy = new File([''], fileName);
+                          (dummy as unknown as { resolvedPath?: string }).resolvedPath = picked;
+                          setSelectedFileForConvert(dummy);
+                          const ext = fileName.split('.').pop()?.toLowerCase();
+                          if (ext === 'pdf') setTargetFormat('txt');
+                          else setTargetFormat('png');
+                          return;
+                        }
+                      } catch (err) {
+                        console.warn('Native file picker error in dashboard:', err);
+                      }
+                    }
+                    const input = document.getElementById('dashboard-file-input') as HTMLInputElement | null;
+                    input?.click();
+                  }}
                   onDragOver={(e) => {
                     e.preventDefault();
                     e.currentTarget.classList.add('drag-over');
@@ -377,6 +410,10 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                     e.currentTarget.classList.remove('drag-over');
                     if (e.dataTransfer.files.length > 0) {
                       const file = e.dataTransfer.files[0];
+                      const resolved = window.radialAPI?.getPathForFile(file);
+                      if (resolved) {
+                        (file as unknown as { resolvedPath?: string }).resolvedPath = resolved;
+                      }
                       setSelectedFileForConvert(file);
                       const ext = file.name.split('.').pop()?.toLowerCase();
                       if (ext === 'pdf') setTargetFormat('txt');
@@ -385,11 +422,16 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                   }}
                 >
                   <input
+                    id="dashboard-file-input"
                     type="file"
                     style={{ display: 'none' }}
                     onChange={(e) => {
                       if (e.target.files && e.target.files[0]) {
                         const file = e.target.files[0];
+                        const resolved = window.radialAPI?.getPathForFile(file);
+                        if (resolved) {
+                          (file as unknown as { resolvedPath?: string }).resolvedPath = resolved;
+                        }
                         setSelectedFileForConvert(file);
                         const ext = file.name.split('.').pop()?.toLowerCase();
                         if (ext === 'pdf') setTargetFormat('txt');
@@ -402,7 +444,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                   <span style={{ fontSize: '12px', color: 'var(--text-muted)', marginTop: '4px' }}>
                     Supports Images (JPG, PNG, WEBP, BMP, TIFF) and PDF Documents
                   </span>
-                </label>
+                </div>
               ) : (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
                   <div

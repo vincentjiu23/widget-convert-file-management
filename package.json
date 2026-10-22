@@ -1,6 +1,6 @@
 {
   "name": "radial-file-studio",
-  "version": "0.3.0",
+  "version": "0.3.2",
   "description": "Windows-first floating glassmorphic radial desktop converter and local file manager",
   "main": "dist-electron/main/index.js",
   "type": "module",

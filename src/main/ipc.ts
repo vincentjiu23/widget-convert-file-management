@@ -176,12 +176,39 @@ export function setupIpcHandlers(
 
   ipcMain.handle('dialog:openDirectory', async (event) => {
     if (!verifyIpcSender(event)) return null;
-    const win = windowControllers.getDashboardWindow() || windowControllers.getWidgetWindow();
+    const win = BrowserWindow.fromWebContents(event.sender) || windowControllers.getDashboardWindow() || windowControllers.getWidgetWindow();
     if (!win) return null;
 
     const result = await dialog.showOpenDialog(win, {
       properties: ['openDirectory', 'dontAddToRecent'],
       title: 'Select Folder to Approve and Index'
+    });
+
+    if (result.canceled || result.filePaths.length === 0) {
+      return null;
+    }
+
+    return result.filePaths[0];
+  });
+
+  ipcMain.handle('dialog:openFile', async (event, filters?: unknown) => {
+    if (!verifyIpcSender(event)) return null;
+    const win = BrowserWindow.fromWebContents(event.sender) || windowControllers.getDashboardWindow() || windowControllers.getWidgetWindow();
+    if (!win) return null;
+
+    const fileFilters = Array.isArray(filters)
+      ? (filters as Array<{ name: string; extensions: string[] }>)
+      : [
+          { name: 'Supported Files', extensions: ['png', 'jpg', 'jpeg', 'webp', 'bmp', 'tiff', 'tif', 'pdf'] },
+          { name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp', 'bmp', 'tiff', 'tif'] },
+          { name: 'Documents', extensions: ['pdf'] },
+          { name: 'All Files', extensions: ['*'] }
+        ];
+
+    const result = await dialog.showOpenDialog(win, {
+      properties: ['openFile', 'dontAddToRecent'],
+      filters: fileFilters,
+      title: 'Select File to Convert'
     });
 
     if (result.canceled || result.filePaths.length === 0) {
@@ -337,17 +364,33 @@ export function setupIpcHandlers(
   // Generic Unified Converter: delegates cleanly by file type and records consistent state
   ipcMain.handle('conversion:convertFile', async (event, sourcePath: unknown, targetFormat: unknown, options?: unknown) => {
     if (!verifyIpcSender(event)) {
-      return { success: false, error: 'UNAUTHORIZED: Invalid IPC sender' };
+      return { success: false, error: 'UNAUTHORIZED: Invalid IPC sender', status: 'FAILED' };
     }
 
     if (typeof sourcePath !== 'string' || !sourcePath.trim()) {
-      return { success: false, error: 'BAD_REQUEST: sourcePath must be a non-empty string' };
+      return { success: false, error: 'BAD_REQUEST: sourcePath must be a non-empty string', status: 'FAILED' };
     }
     if (typeof targetFormat !== 'string' || !targetFormat.trim()) {
-      return { success: false, error: 'BAD_REQUEST: targetFormat must be a non-empty string' };
+      return { success: false, error: 'BAD_REQUEST: targetFormat must be a non-empty string', status: 'FAILED' };
     }
 
     const cleanSource = sourcePath.trim();
+    if (!path.isAbsolute(cleanSource)) {
+      return {
+        success: false,
+        error: 'BAD_REQUEST: sourcePath must be an absolute filesystem path. File names without directory paths cannot be converted.',
+        status: 'FAILED'
+      };
+    }
+
+    if (!fs.existsSync(cleanSource)) {
+      return {
+        success: false,
+        error: `FILE_NOT_FOUND: Source file does not exist: ${cleanSource}`,
+        status: 'FAILED'
+      };
+    }
+
     const cleanTarget = targetFormat.trim().toLowerCase().replace(/^\./, '');
     const ext = path.extname(cleanSource).toLowerCase().replace(/^\./, '');
 
@@ -355,12 +398,22 @@ export function setupIpcHandlers(
     const isImage = imageExts.includes(ext);
     const isPdf = ext === 'pdf';
 
-    if (isImage) {
-      return imageConverter.convertImage(cleanSource, cleanTarget, options as ImageConversionOptions);
-    }
+    try {
+      if (isImage) {
+        return await imageConverter.convertImage(cleanSource, cleanTarget, options as ImageConversionOptions);
+      }
 
-    if (isPdf && cleanTarget === 'txt') {
-      return documentConverter.convertDocument(cleanSource, cleanTarget, options as DocumentConversionOptions);
+      if (isPdf && cleanTarget === 'txt') {
+        return await documentConverter.convertDocument(cleanSource, cleanTarget, options as DocumentConversionOptions);
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error('[IPC conversion:convertFile] Conversion error:', err);
+      return {
+        success: false,
+        error: `Conversion failed: ${msg}`,
+        status: 'FAILED'
+      };
     }
 
     // Unsupported conversion request: record honest database entry and return informative error
@@ -368,13 +421,13 @@ export function setupIpcHandlers(
     const filename = path.basename(cleanSource);
     const reason = isPdf
       ? `PDF target format .${cleanTarget.toUpperCase()} is not supported. Currently only PDF to TXT text extraction is available.`
-      : `Conversion from .${ext.toUpperCase()} to .${cleanTarget.toUpperCase()} is not yet implemented.`;
+      : `Conversion from .${ext.toUpperCase()} to .${cleanTarget.toUpperCase()} is not supported.`;
 
     databaseService.insertConversionJob({
       id: jobId,
       source_path: cleanSource,
       source_filename: filename,
-      input_format: ext,
+      input_format: ext || 'unknown',
       output_format: cleanTarget,
       output_path: null,
       status: 'UNSUPPORTED',
@@ -396,6 +449,7 @@ export function setupIpcHandlers(
     return {
       success: false,
       jobId,
+      sourcePath: cleanSource,
       error: reason,
       status: 'UNSUPPORTED'
     };

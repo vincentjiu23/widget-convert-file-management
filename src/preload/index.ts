@@ -12,14 +12,27 @@ import {
 const radialAPI: RadialAPI = {
   getPathForFile: (file: File): string => {
     try {
-      return webUtils.getPathForFile(file) || file.name;
+      if (webUtils && typeof webUtils.getPathForFile === 'function') {
+        const resolved = webUtils.getPathForFile(file);
+        if (resolved && typeof resolved === 'string' && resolved.trim()) {
+          return resolved.trim();
+        }
+      }
+      if ('path' in file && typeof (file as any).path === 'string' && (file as any).path.trim()) {
+        return (file as any).path.trim();
+      }
+      return '';
     } catch {
-      return file.name;
+      return '';
     }
   },
 
   openFolderPicker: async (): Promise<string | null> => {
     return ipcRenderer.invoke('dialog:openDirectory');
+  },
+
+  openFilePicker: async (filters?: Array<{ name: string; extensions: string[] }>): Promise<string | null> => {
+    return ipcRenderer.invoke('dialog:openFile', filters);
   },
 
   openPath: async (targetPath: string): Promise<boolean> => {

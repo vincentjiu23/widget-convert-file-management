@@ -105,6 +105,7 @@ describe('IPC Contract: Preload ↔ Main Handler Parity', () => {
       'index:stats',
       'activity:getLogs',
       'dialog:openDirectory',
+      'dialog:openFile',
       'shell:openPath',
       'shell:showItemInFolder',
       'window:setIgnoreMouseEvents',

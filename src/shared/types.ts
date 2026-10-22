@@ -113,6 +113,7 @@ export interface ImageConversionResult {
   outputFormat: string;
   durationMs: number;
   error?: string;
+  status?: string;
 }
 
 export interface DocumentConversionResult {
@@ -127,6 +128,7 @@ export interface DocumentConversionResult {
   outputFormat: string;
   durationMs: number;
   error?: string;
+  status?: string;
 }
 
 export interface ImageMetadata {
@@ -148,6 +150,7 @@ export interface WidgetState {
 export interface RadialAPI {
   getPathForFile: (file: File) => string;
   openFolderPicker: () => Promise<string | null>;
+  openFilePicker: (filters?: Array<{ name: string; extensions: string[] }>) => Promise<string | null>;
   openPath: (path: string) => Promise<boolean>;
   showItemInFolder: (path: string) => Promise<boolean>;
   getApprovedFolders: () => Promise<ApprovedFolder[]>;

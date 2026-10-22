@@ -1,4 +1,4 @@
-import React, { useRef, useState, useEffect } from 'react';
+import React, { useRef, useState, useEffect, useCallback } from 'react';
 import {
   StateMachineContext,
   StateMachineAction,
@@ -31,7 +31,8 @@ import {
   CheckCircle,
   AlertTriangle,
   FileText,
-  Image as ImageIcon
+  Image as ImageIcon,
+  FolderOpen
 } from 'lucide-react';
 
 const CANVAS_SIZE = 380;
@@ -41,6 +42,7 @@ const R_OUTER = 160;
 
 export const WidgetView: React.FC = () => {
   const [context, dispatch] = React.useReducer(radialStateReducer, INITIAL_STATE_CONTEXT);
+  const [showErrorDetail, setShowErrorDetail] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -50,7 +52,36 @@ export const WidgetView: React.FC = () => {
     (context.state === 'FORMAT_RING_VISIBLE' || context.state === 'SECTOR_HOVER') &&
     sectors.length > 0;
 
-  // Prevent frameless transparent window from stealing clicks from desktop & background windows
+  /**
+   * Robust file path resolver:
+   * Extracts real absolute filesystem path via Electron webUtils.
+   * Never returns file.name as a pseudo-path.
+   */
+  const resolveFilePath = useCallback((file: File): string => {
+    if (window.radialAPI?.getPathForFile) {
+      try {
+        const p = window.radialAPI.getPathForFile(file);
+        if (p && typeof p === 'string' && (p.includes('\\') || p.includes('/'))) {
+          return p.trim();
+        }
+      } catch {
+        // webUtils resolution failed
+      }
+    }
+
+    const legacyPath = (file as unknown as { path?: string }).path;
+    if (legacyPath && typeof legacyPath === 'string' && (legacyPath.includes('\\') || legacyPath.includes('/'))) {
+      return legacyPath.trim();
+    }
+
+    return '';
+  }, []);
+
+  /**
+   * Click-through and selective interaction manager:
+   * Passes clicks through transparent areas outside the interactive widget geometry.
+   * Keeps center circle, radial sectors, header drag bar, and action buttons responsive.
+   */
   useEffect(() => {
     let isIgnoring = false;
 
@@ -61,9 +92,11 @@ export const WidgetView: React.FC = () => {
       const isInteractive = Boolean(
         target.closest('.primary-circle') ||
         target.closest('.widget-drag-bar') ||
-        target.closest('.radial-svg-canvas') ||
+        target.closest('.radial-sector-path') ||
+        target.closest('.widget-action-btn') ||
         target.closest('.btn-glass') ||
-        target.closest('.widget-no-drag')
+        target.closest('.widget-no-drag') ||
+        target.closest('.widget-error-pill')
       );
 
       if (isInteractive && isIgnoring) {
@@ -82,50 +115,91 @@ export const WidgetView: React.FC = () => {
       }
     };
 
+    const handleWindowBlur = () => {
+      if (!isIgnoring) {
+        window.radialAPI?.setIgnoreMouseEvents(true, true);
+        isIgnoring = true;
+      }
+    };
+
+    // When dragging OS files into the window, drag events fire instead of mousemove.
+    // Ensure mouse events are NEVER ignored during dragover so drop targets work reliably.
+    const handleDragEnter = () => {
+      if (isIgnoring) {
+        window.radialAPI?.setIgnoreMouseEvents(false);
+        isIgnoring = false;
+      }
+    };
+
     window.addEventListener('mousemove', handleMouseMove);
     document.addEventListener('mouseleave', handleMouseLeave);
+    window.addEventListener('blur', handleWindowBlur);
+    window.addEventListener('dragenter', handleDragEnter);
+    window.addEventListener('dragover', handleDragEnter);
 
     return () => {
       window.removeEventListener('mousemove', handleMouseMove);
       document.removeEventListener('mouseleave', handleMouseLeave);
+      window.removeEventListener('blur', handleWindowBlur);
+      window.removeEventListener('dragenter', handleDragEnter);
+      window.removeEventListener('dragover', handleDragEnter);
       window.radialAPI?.setIgnoreMouseEvents(false);
     };
   }, []);
 
-  const handleOpenDashboard = () => {
+  const handleOpenDashboard = (e: React.MouseEvent) => {
+    e.stopPropagation();
     if (window.radialAPI?.openDashboardWindow) {
       window.radialAPI.openDashboardWindow();
     }
   };
 
-  const handleCloseWidget = () => {
+  const handleCloseWidget = (e: React.MouseEvent) => {
+    e.stopPropagation();
     if (window.radialAPI?.toggleDesktopWidget) {
       window.radialAPI.toggleDesktopWidget(false);
     }
   };
 
-  const handleExecuteDrop = async (file: File, sector: RadialSector) => {
-    const rawPath = window.radialAPI?.getPathForFile(file) || file.name;
-    const jobId = `job-${Date.now()}`;
+  /**
+   * Primary conversion execution pipeline:
+   * Validates path, calls convertFile, logs progress, and manages UI state.
+   */
+  const executeConversion = async (sourcePath: string, sector: RadialSector) => {
+    if (!sourcePath || (!sourcePath.includes('/') && !sourcePath.includes('\\'))) {
+      dispatch({
+        type: 'JOB_FAILED',
+        error: 'Invalid file path. Please select the file using the file picker.'
+      });
+      return;
+    }
 
+    const jobId = `job-${Date.now()}`;
     dispatch({ type: 'JOB_STARTED', jobId });
+    setShowErrorDetail(false);
 
     try {
       if (!window.radialAPI?.convertFile) {
         throw new Error('Conversion API unavailable.');
       }
 
-      const result = await window.radialAPI.convertFile(rawPath, sector.format);
+      const result = await window.radialAPI.convertFile(sourcePath, sector.format);
       if (result.success && result.outputPath) {
+        const outName = result.outputPath.split(/[/\\]/).pop();
         dispatch({
           type: 'JOB_COMPLETED',
           outputPath: result.outputPath,
-          message: `Converted to .${sector.format.toUpperCase()}: ${result.outputPath.split(/[/\\]/).pop()}`
+          message: `Converted to .${sector.format.toUpperCase()}: ${outName}`
         });
       } else {
+        const errorText =
+          result.error ||
+          (result.status === 'UNSUPPORTED'
+            ? `Conversion to .${sector.format.toUpperCase()} is not supported.`
+            : 'Conversion failed.');
         dispatch({
           type: 'JOB_FAILED',
-          error: result.error || 'Conversion failed.'
+          error: errorText
         });
       }
     } catch (err: unknown) {
@@ -134,6 +208,35 @@ export const WidgetView: React.FC = () => {
         error: err instanceof Error ? err.message : String(err)
       });
     }
+  };
+
+  /**
+   * Safe native file picker invocation:
+   * Uses native Windows file dialog to guarantee an absolute, valid filesystem path.
+   */
+  const handleOpenNativeFilePicker = async () => {
+    if (window.radialAPI?.openFilePicker) {
+      try {
+        const selectedPath = await window.radialAPI.openFilePicker();
+        if (selectedPath && typeof selectedPath === 'string' && selectedPath.trim()) {
+          const cleanPath = selectedPath.trim();
+          const fileName = cleanPath.split(/[/\\]/).pop() || cleanPath;
+          const classified = classifyFile({
+            name: fileName,
+            path: cleanPath
+          });
+          dispatch({ type: 'DRAG_ENTER', file: classified });
+          dispatch({ type: 'TYPE_DETECTED', category: classified.category });
+          setShowErrorDetail(false);
+          return;
+        }
+      } catch (err) {
+        console.warn('[WidgetView] Native file picker error:', err);
+      }
+    }
+
+    // Fallback to HTML file input if native picker is unavailable
+    fileInputRef.current?.click();
   };
 
   const handleDragOver = (e: React.DragEvent) => {
@@ -173,6 +276,8 @@ export const WidgetView: React.FC = () => {
     }
 
     const file = e.dataTransfer.files[0];
+    const resolvedPath = resolveFilePath(file);
+
     const rect = containerRef.current.getBoundingClientRect();
     const x = e.clientX - rect.left;
     const y = e.clientY - rect.top;
@@ -183,26 +288,55 @@ export const WidgetView: React.FC = () => {
       if (hit.isInsideRing && hit.sectorIndex >= 0 && hit.sectorIndex < sectors.length) {
         const sector = sectors[hit.sectorIndex];
         dispatch({ type: 'DROP_ON_SECTOR', sector });
-        handleExecuteDrop(file, sector);
+
+        if (resolvedPath) {
+          executeConversion(resolvedPath, sector);
+        } else if (context.activeFile?.path) {
+          executeConversion(context.activeFile.path, sector);
+        } else {
+          dispatch({
+            type: 'JOB_FAILED',
+            error: 'File path unavailable from browser drop. Please click the center to select the file directly.'
+          });
+        }
         return;
       }
     }
 
-    // Dropped onto center circle: detect category
-    const classified = classifyFile(file);
-    dispatch({ type: 'DRAG_ENTER', file: classified });
-    dispatch({ type: 'TYPE_DETECTED', category: classified.category });
+    // Dropped onto center circle: detect category and retain resolved path
+    if (resolvedPath) {
+      const classified = classifyFile({
+        name: file.name,
+        path: resolvedPath,
+        type: file.type,
+        size: file.size
+      });
+      dispatch({ type: 'DRAG_ENTER', file: classified });
+      dispatch({ type: 'TYPE_DETECTED', category: classified.category });
+      setShowErrorDetail(false);
+    } else {
+      dispatch({
+        type: 'JOB_FAILED',
+        error: 'Cannot read file path from drop. Please click the center circle to select your file directly.'
+      });
+    }
   };
 
   return (
-    <div className="widget-window-container" ref={containerRef} onDragOver={handleDragOver} onDrop={handleDrop}>
-      {/* Dedicated Drag Bar Header */}
+    <div
+      className="widget-window-container"
+      ref={containerRef}
+      onDragOver={handleDragOver}
+      onDrop={handleDrop}
+    >
+      {/* Sleek Translucent Drag Bar Header */}
       <div className="widget-drag-bar">
         <GripHorizontal size={14} color="#f97316" />
         <span>Radial File Studio</span>
         <button
           className="widget-no-drag"
           onClick={handleCloseWidget}
+          onMouseDown={(e) => e.stopPropagation()}
           title="Hide Widget"
           style={{
             background: 'transparent',
@@ -211,23 +345,25 @@ export const WidgetView: React.FC = () => {
             cursor: 'pointer',
             display: 'flex',
             alignItems: 'center',
-            marginLeft: '4px'
+            marginLeft: '4px',
+            padding: '2px',
+            borderRadius: '4px'
           }}
         >
           <X size={13} />
         </button>
       </div>
 
-      {/* SVG Radial Sectors */}
+      {/* SVG Radial Sectors (Translucent Frosted Acrylic) */}
       {isRingExpanded && (
         <svg
-          className="radial-svg-canvas widget-no-drag"
+          className="radial-svg-canvas"
           width={CANVAS_SIZE}
           height={CANVAS_SIZE}
           viewBox={`0 0 ${CANVAS_SIZE} ${CANVAS_SIZE}`}
         >
           <defs>
-            <filter id="glow" x="-20%" y="-20%" width="140%" height="140%">
+            <filter id="sector-glow" x="-20%" y="-20%" width="140%" height="140%">
               <feGaussianBlur stdDeviation="3" result="blur" />
               <feComposite in="SourceGraphic" in2="blur" operator="over" />
             </filter>
@@ -245,29 +381,26 @@ export const WidgetView: React.FC = () => {
             return (
               <g
                 key={sector.id}
+                className="widget-no-drag"
                 onClick={() => {
-                  if (context.activeFile) {
-                    const synth = new File([''], context.activeFile.name);
-                    handleExecuteDrop(synth, sector);
+                  if (context.activeFile?.path) {
+                    executeConversion(context.activeFile.path, sector);
+                  } else {
+                    dispatch({
+                      type: 'JOB_FAILED',
+                      error: 'No active file selected. Click the center circle to choose a file.'
+                    });
                   }
                 }}
               >
                 <path
                   d={pathData}
                   className={`radial-sector-path ${isHovered ? 'is-active' : ''}`}
-                  style={{
-                    fill: isHovered ? 'rgba(249, 115, 22, 0.35)' : 'rgba(18, 26, 47, 0.85)',
-                    stroke: isHovered ? '#f97316' : 'rgba(255, 255, 255, 0.16)'
-                  }}
                 />
                 <text
                   x={labelPos.x}
                   y={labelPos.y + 4}
-                  fill={isHovered ? '#f97316' : '#f8fafc'}
-                  fontSize="11"
-                  fontWeight="800"
-                  textAnchor="middle"
-                  pointerEvents="none"
+                  className={`radial-sector-text ${isHovered ? 'is-active' : ''}`}
                 >
                   .{sector.format.toUpperCase()}
                 </text>
@@ -277,14 +410,15 @@ export const WidgetView: React.FC = () => {
         </svg>
       )}
 
-      {/* Central Primary Circle */}
+      {/* Central Primary Circle (Frosted Transparent Acrylic Glass) */}
       <div
         className={`primary-circle widget-no-drag ${context.state === 'FILE_HOVER' ? 'is-dragging' : ''}`}
         onClick={() => {
           if (context.state === 'SUCCESS' || context.state === 'ERROR') {
             dispatch({ type: 'RESET_IDLE' });
+            setShowErrorDetail(false);
           } else {
-            fileInputRef.current?.click();
+            handleOpenNativeFilePicker();
           }
         }}
       >
@@ -295,9 +429,16 @@ export const WidgetView: React.FC = () => {
           onChange={(e) => {
             if (e.target.files && e.target.files[0]) {
               const file = e.target.files[0];
-              const classified = classifyFile(file);
+              const resolvedPath = resolveFilePath(file);
+              const classified = classifyFile({
+                name: file.name,
+                path: resolvedPath || file.name,
+                type: file.type,
+                size: file.size
+              });
               dispatch({ type: 'DRAG_ENTER', file: classified });
               dispatch({ type: 'TYPE_DETECTED', category: classified.category });
+              setShowErrorDetail(false);
             }
           }}
         />
@@ -305,61 +446,108 @@ export const WidgetView: React.FC = () => {
         {context.state === 'PROCESSING' ? (
           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '6px' }}>
             <RefreshCw size={26} className="animate-spin" color="#f97316" />
-            <span style={{ fontSize: '11px', fontWeight: '700' }}>Converting...</span>
+            <span style={{ fontSize: '11px', fontWeight: '700', color: '#ffffff' }}>Converting...</span>
           </div>
         ) : context.state === 'SUCCESS' ? (
-          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '6px' }}>
-            <CheckCircle size={26} color="#10b981" />
-            <span style={{ fontSize: '11px', fontWeight: '700', color: '#10b981' }}>Converted!</span>
-            <span style={{ fontSize: '9px', color: 'var(--text-dim)' }}>Click to reset</span>
+          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '5px' }}>
+            <CheckCircle size={24} color="#34d399" />
+            <span style={{ fontSize: '11px', fontWeight: '700', color: '#34d399' }}>Converted!</span>
+            <span
+              style={{
+                fontSize: '9px',
+                color: 'var(--text-secondary)',
+                maxWidth: '110px',
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                whiteSpace: 'nowrap'
+              }}
+              title={context.lastOutputPath || ''}
+            >
+              {context.lastOutputPath?.split(/[/\\]/).pop() || ''}
+            </span>
+            <span style={{ fontSize: '8px', color: 'var(--text-muted)' }}>Click to reset</span>
           </div>
         ) : context.state === 'ERROR' ? (
-          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '4px', padding: '0 4px' }}>
-            <AlertTriangle size={22} color="#ef4444" />
-            <span style={{ fontSize: '10px', fontWeight: '700', color: '#ef4444', textAlign: 'center' }}>
-              {context.errorMessage?.slice(0, 45) || 'Error'}
+          <div
+            style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '4px', padding: '0 4px' }}
+            onClick={(e) => {
+              e.stopPropagation();
+              setShowErrorDetail(!showErrorDetail);
+            }}
+          >
+            <AlertTriangle size={22} color="#f87171" />
+            <span style={{ fontSize: '10px', fontWeight: '800', color: '#f87171' }}>Conversion Error</span>
+            <span
+              style={{
+                fontSize: '9px',
+                color: 'var(--text-secondary)',
+                textAlign: 'center',
+                maxWidth: '110px',
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                whiteSpace: 'nowrap'
+              }}
+              title={context.errorMessage || ''}
+            >
+              {context.errorMessage?.slice(0, 32) || 'Operation failed'}
             </span>
+            <span style={{ fontSize: '8px', color: 'var(--text-muted)' }}>Click to dismiss</span>
           </div>
         ) : context.activeFile ? (
           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '4px' }}>
             {context.activeFile.category === 'document' ? (
-              <FileText size={22} color="#10b981" />
+              <FileText size={22} color="#34d399" />
             ) : (
               <ImageIcon size={22} color="#38bdf8" />
             )}
-            <span style={{ fontSize: '11px', fontWeight: '800', maxWidth: '100px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            <span
+              style={{
+                fontSize: '11px',
+                fontWeight: '800',
+                maxWidth: '105px',
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                whiteSpace: 'nowrap',
+                color: '#ffffff'
+              }}
+              title={context.activeFile.name}
+            >
               {context.activeFile.name}
             </span>
             <span style={{ fontSize: '9px', color: '#f97316', fontWeight: '700' }}>
-              Select format ring
+              Select target format
             </span>
           </div>
         ) : (
           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '4px' }}>
             <Sparkles size={24} color="#f97316" />
-            <span style={{ fontSize: '12px', fontWeight: '800', color: '#f8fafc' }}>Drop File</span>
-            <span style={{ fontSize: '9px', color: 'var(--text-dim)' }}>Image or PDF</span>
+            <span style={{ fontSize: '12px', fontWeight: '800', color: '#ffffff' }}>Drop File</span>
+            <span style={{ fontSize: '9px', color: 'var(--text-dim)' }}>or click to browse</span>
           </div>
         )}
       </div>
 
+      {/* Structured Compact Error Pill (if opened or active error) */}
+      {context.state === 'ERROR' && showErrorDetail && context.errorMessage && (
+        <div
+          className="widget-error-pill widget-no-drag"
+          onClick={() => setShowErrorDetail(false)}
+          title="Click to dismiss"
+        >
+          <AlertTriangle size={14} color="#f87171" style={{ flexShrink: 0 }} />
+          <span style={{ fontSize: '10px', color: '#ffffff', lineHeight: 1.3 }}>
+            {context.errorMessage}
+          </span>
+          <X size={12} color="var(--text-muted)" style={{ cursor: 'pointer', marginLeft: 'auto', flexShrink: 0 }} />
+        </div>
+      )}
+
       {/* Bottom Floating Action: Open Dashboard */}
       <button
-        className="btn-glass widget-no-drag"
+        className="widget-action-btn widget-no-drag"
         onClick={handleOpenDashboard}
-        style={{
-          position: 'absolute',
-          bottom: '8px',
-          left: '50%',
-          transform: 'translateX(-50%)',
-          fontSize: '11px',
-          padding: '4px 10px',
-          borderRadius: '999px',
-          background: 'rgba(15, 23, 42, 0.85)',
-          backdropFilter: 'blur(12px)',
-          border: '1px solid var(--border-glass)',
-          boxShadow: '0 4px 12px rgba(0, 0, 0, 0.3)'
-        }}
+        onMouseDown={(e) => e.stopPropagation()}
+        title="Open Full Application Dashboard"
       >
         <ExternalLink size={12} color="#f97316" />
         <span>Open Dashboard</span>
